@@ -102,11 +102,11 @@ class ExperimentConfig:
     #   node_prior - cluster-internal observer consensus is consumed as an
     #   extra prior for each node's own trajectory and feeds KF-DPC, without
     #   replacing the final node trajectory with the consensus directly.
-    cluster_mode: str = "localization"
+    cluster_mode: str = "node_prior"
     cluster_constraint_type: str = "vector"
     cluster_localization_iterations: int = 5
     cluster_dpc_prior_weight: float = 0.1
-    uav_kf_prior_mode: str = "none"
+    uav_kf_prior_mode: str = "dpc_only"
     cluster_uav_prior_noise_std: float = 1.0
     cluster_node_prior_noise_std: float = 1.0
     # Set to False to omit the cluster trajectory-correction branches.  The
