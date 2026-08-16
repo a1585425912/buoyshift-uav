@@ -4,6 +4,7 @@
 
 ## 目录结构
 
+- `ALGORITHM_SUMMARY.md`：算法流程与 cluster 机制的详细技术总结（场景模型、双时间尺度主循环、KF 实现细节、node_prior 簇内机制、误差缩减机理、指标体系与各入口脚本）。
 - `dfpc_experiment/config.py`：实验参数和命令行接口，优先修改这里。
 - `dfpc_experiment/scenario.py`：UAV、节点位置和观测模型。
 - `dfpc_experiment/trajectory.py`：节点在线估计 UAV 匀速直线参数。
