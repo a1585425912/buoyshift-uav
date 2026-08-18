@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from dfpc_experiment.recompute_no_algorithm_iid import COHERENCE_FACTOR
 from dfpc_experiment.metrics import add_power_reference_metrics, random_phase_reference_metrics
 from dfpc_experiment.sim_core import (
     apply_polarity_correction,
@@ -14,6 +15,16 @@ from dfpc_experiment.sim_core import (
 
 
 class RandomPhaseReferenceTests(unittest.TestCase):
+    def test_folded_phase_expected_power_uses_coherence_factor(self) -> None:
+        n = 100
+        amp = np.linspace(0.5, 1.5, n)
+        sum_amp_sq = float(np.sum(amp**2))
+        ideal = float(np.sum(amp) ** 2)
+        expected = sum_amp_sq + COHERENCE_FACTOR**2 * (ideal - sum_amp_sq)
+        self.assertAlmostEqual(COHERENCE_FACTOR, 2.0 / np.pi, places=12)
+        self.assertGreater(expected, sum_amp_sq)
+        self.assertLess(expected, ideal)
+
     def test_iid_uniform_phase_statistics(self) -> None:
         n = 200_000
         rng = np.random.default_rng(12345)

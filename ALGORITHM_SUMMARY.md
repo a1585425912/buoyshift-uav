@@ -135,7 +135,7 @@ Cluster DPC / Cluster UAV+Node-KF DPC 两个方法用作节点侧估计。
   （`effective_phase_errors`）：发射端允许 0/π 极性反转，折叠是物理等价操作而非截断；
 - 功率 P = |Σ ampᵢ·e^{jθresᵢ}|²；归一化功率 P/P_ideal（dB 后即 norm_db）；
 - phase_std：折叠后残余相位的**普通样本标准差**（沿用旧实验 σ_φ 口径，非圆统计），
-  phase_rmse：相对 0 的 RMS；随机相位参考的理论底线 ≈ 180°/√12 ≈ 51.96°；
+  phase_rmse：相对 0 的 RMS；随机相位参考的理论底线 ≈ 90°/√3 ≈ 51.96°；
 - 距离/节点/UAV RMSE 用于分解误差来源。
 
 ---
@@ -239,7 +239,8 @@ Cluster DPC / Cluster UAV+Node-KF DPC 两个方法用作节点侧估计。
 核心指标：norm_db = 10log₁₀(P/P_ideal)（越接近 0 dB 越好）；
 gain_over_single_mean/best_db（相对单节点的阵列增益，节点数实验主指标）；
 phase_std/rmse（°）；distance/node/uav RMSE（m）；tail = 后 20% 短步的稳态统计。
-理论参考：完全随机相位时 P/P_ideal ≈ 1/N（-10log₁₀N dB），全相干为 0 dB。
+理论参考：完全随机相位经 0/π 极性折叠后，E[e^{jφ}] = 2/π，
+因此 P/P_ideal ≈ (2/π)² ≈ 0.405（约 -3.92 dB），全相干为 0 dB。
 
 ---
 
@@ -256,8 +257,8 @@ phase_std/rmse（°）；distance/node/uav RMSE（m）；tail = 后 20% 短步�
   （仅 Random/No Algorithm/DPC 三方法）；
 - `dfpc_experiment/run_kf_array_experiment.py`：仅保留两条 KF 支路的多天线（1/2/4/8 阵元）
   实验，总功率固定，含浮标姿态误差与阵元差分校准误差；
-- `dfpc_experiment/recompute_no_algorithm_iid.py`：用解析 i.i.d. 随机相位基线
-  （σ_φ = 180°/√3）重新统计既有结果；
+- `dfpc_experiment/recompute_no_algorithm_iid.py`：用解析 i.i.d. 折叠相位基线
+  （σ_φ = 90°/√3，E[e^{jφ}] = 2/π）重新统计既有结果；
 - `relative_spatial_consensus_experiment.py`（仓库根）：纯空域分解实验，把路径误差拆成
   "UAV-Node 相对几何误差"与"节点自身误差"，验证平均共识对不一致性的抑制；
 - `work/`：高频/先验机制的探索性 sweep 脚本（high_freq_prior_sweep、

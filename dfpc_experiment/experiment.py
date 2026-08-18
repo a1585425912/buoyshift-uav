@@ -63,6 +63,21 @@ from .trajectory import (
 )
 
 
+def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
+    """Return the covariance of a doubly-stochastic linear consensus update.
+
+    For ``x_new[i] = sum_j W[i, j] x[j]`` with independent per-node states,
+    the consensus covariance is ``P_new[i] = sum_j W[i, j]^2 P[j]``.  This
+    keeps the filter covariance consistent with the state that was just
+    overwritten by ``consensus_linear_accel``.
+    """
+    W = np.asarray(W, dtype=np.float64)
+    P = np.asarray(P, dtype=np.float64)
+    if W.shape[0] != W.shape[1] or W.shape[0] != P.shape[0]:
+        raise ValueError("W and P must have matching leading dimensions")
+    return np.einsum("ij,jkl->ikl", W**2, P)
+
+
 def run_single_trial(
     cfg: ExperimentConfig,
     seed: int,
@@ -279,11 +294,11 @@ def run_single_trial(
             # single-node noise.  The dpc_only branch instead treats DPC as a
             # normal position pseudo-measurement so the KF fuses it properly.
             if cfg.uav_kf_prior_mode == "none":
-                inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_obs_noise)
+                inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std)
             else:
                 uav_kf_short.update_position_measurement(
                     uav_est_dfpc,
-                    cfg.uav_obs_noise,
+                    cfg.uav_dpc_prior_noise_std,
                 )
                 if (
                     cfg.uav_kf_prior_mode == "dpc_plus_cluster"
@@ -296,20 +311,27 @@ def run_single_trial(
             if cluster_uav_prior_est is not None and uav_kf_prior_short is not None:
                 if sidx > 0:
                     uav_kf_prior_short.predict()
-                inject_position_state(uav_kf_prior_short, uav_est_dfpc, cfg.uav_obs_noise)
+                inject_position_state(
+                    uav_kf_prior_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std
+                )
                 uav_kf_prior_short.update_position_measurement(
                     cluster_uav_prior_est,
                     cfg.cluster_uav_prior_noise_std,
                 )
             z_u_short_kf = p_u_true + rng_obs.normal(0.0, cfg.uav_obs_noise, size=(cfg.N, 3))
-            uav_kf_short.update(z_u_short_kf)
-            if uav_kf_prior_short is not None:
-                uav_kf_prior_short.update(z_u_short_kf)
+            # The first short step is already the filter's initial observation;
+            # applying another independent raw observation here double-counts
+            # the same information and biases the initial covariance downward.
+            if sidx > 0:
+                uav_kf_short.update(z_u_short_kf)
+                if uav_kf_prior_short is not None:
+                    uav_kf_prior_short.update(z_u_short_kf)
             uav_state_short_kf = uav_kf_short.x.copy()
             uav_state_short_kf = backend.consensus_linear_accel(
                 state.W_global, state.W_global_gpu, uav_state_short_kf, 1
             )
             uav_kf_short.x = uav_state_short_kf.copy()
+            uav_kf_short.P = consensus_covariance(state.W_global, uav_kf_short.P)
             uav_est_kf = uav_state_short_kf[:, :3]
             kf_velocity = uav_state_short_kf[:, 3:]
             cluster_uav_est_kf = uav_est_kf
@@ -323,6 +345,9 @@ def run_single_trial(
                     1,
                 )
                 uav_kf_prior_short.x = uav_prior_state.copy()
+                uav_kf_prior_short.P = consensus_covariance(
+                    state.W_global, uav_kf_prior_short.P
+                )
                 cluster_uav_est_kf = uav_prior_state[:, :3]
                 cluster_kf_velocity = uav_prior_state[:, 3:]
 
@@ -331,13 +356,15 @@ def run_single_trial(
             if sidx > 0:
                 node_kf.predict()
             z_b_short_kf = buoy_true_short + rng_obs.normal(0.0, cfg.buoy_center_obs_noise, size=(cfg.N, 3))
-            node_kf.update(z_b_short_kf)
+            if sidx > 0:
+                node_kf.update(z_b_short_kf)
             node_state_kf = node_kf.x.copy()
             node_est_kf = node_state_kf[:, :3]
             if node_kf_prior is not None:
                 if sidx > 0:
                     node_kf_prior.predict()
-                node_kf_prior.update(z_b_short_kf)
+                if sidx > 0:
+                    node_kf_prior.update(z_b_short_kf)
                 node_state_kf_prior = node_kf_prior.x.copy()
                 assert cluster_localizer is not None
                 cluster_node_consensus = cluster_localizer.update(
@@ -707,6 +734,7 @@ def run_single_trial(
             uav_kf_long.x,
             1,
         ).copy()
+        uav_kf_long.P = consensus_covariance(state.W_global, uav_kf_long.P)
 
     return {
         "metrics": metrics,
@@ -744,7 +772,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     for method in methods:
         # 功率类指标必须先在线性域平均，再转成 dB。
         for key in [
-            "gain_linear",
             "power_linear",
             "ideal_power_linear",
             "single_node_mean_power_linear",
@@ -752,6 +779,10 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         ]:
             stack = np.stack([res["metrics"][method][key] for res in trials], axis=0)
             metrics[method][key] = np.mean(stack, axis=0)
+        metrics[method]["gain_linear"] = (
+            metrics[method]["power_linear"]
+            / np.maximum(metrics[method]["ideal_power_linear"], 1e-30)
+        )
         metrics[method]["norm_db"] = 10.0 * np.log10(np.maximum(metrics[method]["gain_linear"], 1e-30))
         metrics[method]["gain_over_single_mean_linear"] = (
             metrics[method]["power_linear"] / np.maximum(metrics[method]["single_node_mean_power_linear"], 1e-30)

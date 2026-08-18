@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -145,6 +145,21 @@ def rotating_cluster_trajectory_correction(
     return corrected
 
 
+def _doubly_stochastic_submatrix(W: np.ndarray, ids: np.ndarray) -> np.ndarray:
+    """Return a doubly-stochastic consensus matrix for a cluster subgraph.
+
+    The global Metropolis-Hastings matrix is doubly stochastic.  Restricting it
+    to a cluster removes edges to outside nodes, so the row sums drop below
+    one.  Row-normalizing would break symmetry and double stochasticity; adding
+    the missing mass to the diagonal preserves both properties.
+    """
+    local_W = np.asarray(W)[np.ix_(ids, ids)].copy()
+    local_W = 0.5 * (local_W + local_W.T)
+    deficit = 1.0 - local_W.sum(axis=1)
+    local_W[np.diag_indices(local_W.shape[0])] += deficit
+    return local_W
+
+
 def cluster_trajectory_consensus(
     trajectory_states: np.ndarray,
     weight_matrix: np.ndarray,
@@ -178,8 +193,7 @@ def cluster_trajectory_consensus(
         count = ids.size
         if count < 2:
             continue
-        local_W = W[np.ix_(ids, ids)].copy()
-        local_W /= np.maximum(local_W.sum(axis=1, keepdims=True), 1e-12)
+        local_W = _doubly_stochastic_submatrix(W, ids)
         local_states = corrected[ids].copy()
         if sigma > 0.0 and rng is not None:
             local_states += rng.normal(0.0, sigma, size=local_states.shape)
@@ -324,14 +338,10 @@ class ClusterTrajectoryLocalizer:
     """
 
     n: int
-    _relative_history: np.ndarray = field(init=False)
-    _initialized: bool = field(default=False, init=False)
-
     def __post_init__(self) -> None:
         self.n = int(self.n)
         if self.n < 1:
             raise ValueError("n must be positive")
-        self._relative_history = np.zeros((self.n, self.n, 3), dtype=np.float64)
 
     def update(
         self,
@@ -365,7 +375,6 @@ class ClusterTrajectoryLocalizer:
         alpha = float(np.clip(alpha, 0.0, 1.0))
         sigma = max(float(relative_noise_std), 0.0)
         steps = max(int(consensus_steps), 1)
-        step_dt = max(float(dt), 1e-12)
 
         corrected = states.copy()
         consensus_states = states.copy()
@@ -377,8 +386,7 @@ class ClusterTrajectoryLocalizer:
 
             local_states = states[ids]
             local_truth = truth[ids]
-            local_W = W[np.ix_(ids, ids)].copy()
-            local_W /= np.maximum(local_W.sum(axis=1, keepdims=True), 1e-12)
+            local_W = _doubly_stochastic_submatrix(W, ids)
 
             if constraint_type == "vector":
                 relative = local_truth[None, :, :] - local_truth[:, None, :]
@@ -394,15 +402,12 @@ class ClusterTrajectoryLocalizer:
                 directions = delta / distance
                 relative = directions * measured_ranges[:, :, None]
 
-            if self._initialized:
-                previous = self._relative_history[np.ix_(ids, ids)]
-                relative_velocity = (relative - previous) / step_dt
-            else:
-                relative_velocity = np.zeros_like(relative)
-
             estimates = np.zeros((count, count, 6), dtype=np.float64)
             estimates[:, :, :3] = local_states[:, None, :3] + relative
-            estimates[:, :, 3:] = local_states[:, None, 3:] + relative_velocity
+            # Relative-position finite differences amplify measurement noise by
+            # 1/dt.  Use each observer's own filtered velocity instead, which
+            # is already a proper velocity estimate and avoids that blow-up.
+            estimates[:, :, 3:] = local_states[:, None, 3:]
 
             for target in range(count):
                 observer_estimates = estimates[:, target, :].copy()
@@ -422,8 +427,6 @@ class ClusterTrajectoryLocalizer:
                     + alpha * consensus
                 )
 
-            self._relative_history[np.ix_(ids, ids)] = relative
-        self._initialized = True
         return corrected if blend_with_own else consensus_states
 
 

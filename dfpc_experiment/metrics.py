@@ -121,14 +121,18 @@ def tail_summary(res: dict[str, Any], method: str, tail_ratio: float = 0.8) -> d
     metrics = res["metrics"]
     total_steps = int(res["total_steps"])
     tail = slice(int(tail_ratio * total_steps), None)
+    tail_power = float(np.mean(metrics[method]["power_linear"][tail]))
+    tail_ideal = float(np.mean(metrics[method]["ideal_power_linear"][tail]))
     row: dict[str, float | str] = {
         "method": method,
-        "tail_mean_power_db": float(10.0 * np.log10(np.maximum(np.mean(metrics[method]["gain_linear"][tail]), 1e-30))),
+        "tail_mean_power_db": float(
+            10.0 * np.log10(np.maximum(tail_power / max(tail_ideal, 1e-30), 1e-30))
+        ),
         "tail_mean_gain_over_single_mean_db": float(
             10.0
             * np.log10(
                 np.maximum(
-                    np.mean(metrics[method]["power_linear"][tail])
+                    tail_power
                     / max(np.mean(metrics[method]["single_node_mean_power_linear"][tail]), 1e-30),
                     1e-30,
                 )
@@ -138,7 +142,7 @@ def tail_summary(res: dict[str, Any], method: str, tail_ratio: float = 0.8) -> d
             10.0
             * np.log10(
                 np.maximum(
-                    np.mean(metrics[method]["power_linear"][tail])
+                    tail_power
                     / max(np.mean(metrics[method]["single_node_best_power_linear"][tail]), 1e-30),
                     1e-30,
                 )

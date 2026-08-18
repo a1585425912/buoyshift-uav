@@ -51,6 +51,9 @@ class ExperimentConfig:
     # buoy_short_*: 浮标相对慢变中心的小尺度有界扰动参数。
     # system_phase_std_deg: 额外系统相位误差，例如同步误差。
     uav_obs_noise: float = 3.0
+    # DPC 共识后的 UAV 位置伪观测噪声。共识平均会压缩单节点观测噪声，
+    # 因此这里应远小于 uav_obs_noise，而不是直接复用 3.0 m。
+    uav_dpc_prior_noise_std: float = 0.3
     buoy_short_radius: float = 1.0
     buoy_short_diffusion: float = 0.08
     buoy_offset_correlation_time: float = 1.2
@@ -108,7 +111,9 @@ class ExperimentConfig:
     cluster_dpc_prior_weight: float = 0.1
     uav_kf_prior_mode: str = "dpc_only"
     cluster_uav_prior_noise_std: float = 1.0
-    cluster_node_prior_noise_std: float = 1.0
+    # 簇内相对测量噪声为 0.2 m，且 M-1 个观测者共识后还会进一步平均，
+    # 因此回灌节点 KF 的伪观测噪声应接近 0.2 m，而不是 1.0 m。
+    cluster_node_prior_noise_std: float = 0.2
     # Set to False to omit the cluster trajectory-correction branches.  The
     # random reference, no-algorithm, DPC and UAV+Node-KF DPC methods remain.
     enable_cluster: bool = True
@@ -161,6 +166,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--Ts", type=float, default=ExperimentConfig.Ts)
 
     parser.add_argument("--uav_obs_noise", type=float, default=ExperimentConfig.uav_obs_noise)
+    parser.add_argument(
+        "--uav_dpc_prior_noise_std",
+        type=float,
+        default=ExperimentConfig.uav_dpc_prior_noise_std,
+    )
     parser.add_argument("--buoy_short_radius", type=float, default=ExperimentConfig.buoy_short_radius)
     parser.add_argument("--buoy_short_diffusion", type=float, default=ExperimentConfig.buoy_short_diffusion)
     parser.add_argument("--buoy_offset_correlation_time", type=float, default=ExperimentConfig.buoy_offset_correlation_time)
@@ -264,6 +274,20 @@ def validate_config(cfg: ExperimentConfig) -> None:
         raise ValueError("N, T_long and K must be positive")
     if cfg.n_clusters < 1:
         raise ValueError("n_clusters must be positive")
+    if cfg.fc_mhz <= 0.0:
+        raise ValueError("fc_mhz must be positive")
+    if cfg.area_radius <= 0.0:
+        raise ValueError("area_radius must be positive")
+    if cfg.uav_height <= 0.0:
+        raise ValueError("uav_height must be positive")
+    if cfg.tx_power < 0.0:
+        raise ValueError("tx_power must be non-negative")
+    if cfg.path_loss_alpha < 0.0:
+        raise ValueError("path_loss_alpha must be non-negative")
+    if not 0.0 <= cfg.global_connectivity <= 1.0:
+        raise ValueError("global_connectivity must be in [0, 1]")
+    if not 0.0 <= cfg.cluster_alpha <= 1.0:
+        raise ValueError("cluster_alpha must be in [0, 1]")
     if cfg.TL <= 0.0 or cfg.Ts <= 0.0:
         raise ValueError("TL and Ts must both be positive")
     if cfg.cluster_mode not in {"trajectory", "localization", "uav_prior", "node_prior"}:
@@ -279,6 +303,7 @@ def validate_config(cfg: ExperimentConfig) -> None:
     nonnegative = {
         "uav_speed": cfg.uav_speed,
         "uav_obs_noise": cfg.uav_obs_noise,
+        "uav_dpc_prior_noise_std": cfg.uav_dpc_prior_noise_std,
         "buoy_short_radius": cfg.buoy_short_radius,
         "buoy_short_diffusion": cfg.buoy_short_diffusion,
         "buoy_offset_correlation_time": cfg.buoy_offset_correlation_time,

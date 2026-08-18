@@ -6,6 +6,7 @@ import numpy as np
 
 from dfpc_experiment.cluster import (
     ClusterTrajectoryLocalizer,
+    _doubly_stochastic_submatrix,
     cluster_trajectory_consensus,
     cluster_node_localization,
     communication_graph_clusters,
@@ -16,6 +17,21 @@ from dfpc_experiment.sim_core import metropolis_hastings_W
 
 
 class ClusterTests(unittest.TestCase):
+    def test_doubly_stochastic_submatrix_preserves_row_and_column_sums(self) -> None:
+        W = np.array(
+            [
+                [0.5, 0.25, 0.25, 0.0],
+                [0.25, 0.5, 0.0, 0.25],
+                [0.25, 0.0, 0.5, 0.25],
+                [0.0, 0.25, 0.25, 0.5],
+            ],
+            dtype=float,
+        )
+        local = _doubly_stochastic_submatrix(W, np.array([0, 1, 2]))
+        np.testing.assert_allclose(local.sum(axis=1), 1.0, atol=1e-12)
+        np.testing.assert_allclose(local.sum(axis=0), 1.0, atol=1e-12)
+        np.testing.assert_allclose(local, local.T, atol=1e-12)
+
     def test_graph_partition_assigns_every_node(self) -> None:
         W = np.array(
             [
