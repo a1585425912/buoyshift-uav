@@ -92,16 +92,14 @@ class ExperimentConfig:
     global_connectivity: float = 0.03
     uav_consensus_steps: int = 3
     n_clusters: int = 40
+    # Legacy trajectory/localization modes use this scalar.  The default
+    # subgraph mode consumes the intra-subgraph peer estimate directly.
     cluster_alpha: float = 0.8
-    # adaptive: derive a per-node fusion weight from the node-KF covariance,
-    # direct communication peers and their localization disagreement.
-    # fixed: retain the legacy scalar cluster_alpha behavior.
-    cluster_alpha_mode: str = "adaptive"
-    cluster_alpha_min: float = 0.0
-    cluster_alpha_max: float = 0.95
     cluster_relative_noise_std: float = 0.2
     cluster_trajectory_noise_std: float = 0.2
     # cluster_mode:
+    #   subgraph - partition the communication graph and locate each node from
+    #   direct peers in its subgraph; no tunable node/cluster fusion weight.
     #   trajectory - legacy intra-cluster UAV trajectory voting.
     #   localization - intra-cluster node localization from pilot relative
     #   constraints plus each node's motion trajectory; DPC node consensus is
@@ -111,7 +109,7 @@ class ExperimentConfig:
     #   node_prior - cluster-internal observer consensus is consumed as an
     #   extra prior for each node's own trajectory and feeds KF-DPC, without
     #   replacing the final node trajectory with the consensus directly.
-    cluster_mode: str = "localization"
+    cluster_mode: str = "subgraph"
     cluster_constraint_type: str = "vector"
     cluster_localization_iterations: int = 5
     cluster_dpc_prior_weight: float = 0.1
@@ -197,13 +195,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--n_clusters", type=int, default=ExperimentConfig.n_clusters)
     parser.add_argument("--cluster_alpha", type=float, default=ExperimentConfig.cluster_alpha)
     parser.add_argument(
-        "--cluster_alpha_mode",
-        choices=["fixed", "adaptive"],
-        default=ExperimentConfig.cluster_alpha_mode,
-    )
-    parser.add_argument("--cluster_alpha_min", type=float, default=ExperimentConfig.cluster_alpha_min)
-    parser.add_argument("--cluster_alpha_max", type=float, default=ExperimentConfig.cluster_alpha_max)
-    parser.add_argument(
         "--cluster_relative_noise_std",
         type=float,
         default=ExperimentConfig.cluster_relative_noise_std,
@@ -215,7 +206,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--cluster_mode",
-        choices=["trajectory", "localization", "uav_prior", "node_prior"],
+        choices=["subgraph", "trajectory", "localization", "uav_prior", "node_prior"],
         default=ExperimentConfig.cluster_mode,
     )
     parser.add_argument(
@@ -287,18 +278,15 @@ def validate_config(cfg: ExperimentConfig) -> None:
         raise ValueError("n_clusters must be positive")
     if cfg.TL <= 0.0 or cfg.Ts <= 0.0:
         raise ValueError("TL and Ts must both be positive")
-    if cfg.cluster_mode not in {"trajectory", "localization", "uav_prior", "node_prior"}:
+    if cfg.cluster_mode not in {"subgraph", "trajectory", "localization", "uav_prior", "node_prior"}:
         raise ValueError(
-            "cluster_mode must be 'trajectory', 'localization', 'uav_prior' or 'node_prior'"
+            "cluster_mode must be 'subgraph', 'trajectory', 'localization', "
+            "'uav_prior' or 'node_prior'"
         )
     if cfg.cluster_constraint_type not in {"vector", "range"}:
         raise ValueError("cluster_constraint_type must be 'vector' or 'range'")
-    if cfg.cluster_alpha_mode not in {"fixed", "adaptive"}:
-        raise ValueError("cluster_alpha_mode must be 'fixed' or 'adaptive'")
     if not 0.0 <= cfg.cluster_alpha <= 1.0:
         raise ValueError("cluster_alpha must be in [0, 1]")
-    if not 0.0 <= cfg.cluster_alpha_min <= cfg.cluster_alpha_max <= 1.0:
-        raise ValueError("cluster_alpha_min/max must satisfy 0 <= min <= max <= 1")
     if cfg.cluster_localization_iterations < 1:
         raise ValueError("cluster_localization_iterations must be positive")
     if cfg.uav_kf_prior_mode not in {"none", "dpc_only", "dpc_plus_cluster"}:
@@ -319,8 +307,6 @@ def validate_config(cfg: ExperimentConfig) -> None:
         "buoy_kf_accel_std": cfg.buoy_kf_accel_std,
         "buoy_kf_initial_velocity_std": cfg.buoy_kf_initial_velocity_std,
         "cluster_alpha": cfg.cluster_alpha,
-        "cluster_alpha_min": cfg.cluster_alpha_min,
-        "cluster_alpha_max": cfg.cluster_alpha_max,
         "cluster_relative_noise_std": cfg.cluster_relative_noise_std,
         "cluster_trajectory_noise_std": cfg.cluster_trajectory_noise_std,
         "cluster_dpc_prior_weight": cfg.cluster_dpc_prior_weight,

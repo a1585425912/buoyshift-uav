@@ -85,7 +85,7 @@ class Kalman3DTests(unittest.TestCase):
         dpc_initial_velocity_rmse = result["metrics"][METHOD_DFPC]["uav_velocity_rmse"][0]
         self.assertLess(metrics["uav_velocity_rmse"][-1], dpc_initial_velocity_rmse)
 
-    def test_adaptive_subgraph_diagnostics_are_exposed_end_to_end(self) -> None:
+    def test_subgraph_mode_and_diagnostics_are_exposed_end_to_end(self) -> None:
         cfg = ExperimentConfig(
             N=40,
             n_clusters=4,
@@ -93,13 +93,13 @@ class Kalman3DTests(unittest.TestCase):
             K=2,
             mc_trials=1,
             device="cpu",
-            cluster_alpha_mode="adaptive",
+            cluster_mode="subgraph",
         )
-        diagnostics = run_experiment(cfg)["cluster_diagnostics"]
-        self.assertTrue(np.all(np.isfinite(diagnostics["alpha_mean"])))
-        self.assertTrue(np.all(diagnostics["alpha_mean"] >= cfg.cluster_alpha_min))
-        self.assertTrue(np.all(diagnostics["alpha_mean"] <= cfg.cluster_alpha_max))
+        result = run_experiment(cfg)
+        diagnostics = result["cluster_diagnostics"]
+        self.assertEqual(result["args"]["cluster_mode"], "subgraph")
         self.assertTrue(np.all(diagnostics["effective_peer_count_mean"] >= 1.0))
+        self.assertTrue(np.all(diagnostics["nodes_with_subgraph_peers"] > 0))
 
 
 if __name__ == "__main__":

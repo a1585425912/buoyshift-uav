@@ -313,30 +313,26 @@ def _relative_constraint_consensus(
 
 @dataclass
 class ClusterTrajectoryLocalizer:
-    """Locate node trajectories with cluster-internal observer DPC.
+    """Locate node trajectories from direct peers in communication subgraphs.
 
     For each target node ``i``, only directly connected peers in its
     communication subgraph form estimates from their own trajectories and the
-    pilot-relative position ``p_i - p_j``.  The subgraph weights combine those
-    estimates before fixed or covariance-adaptive fusion with the target's KF
-    prior.
+    pilot-relative position ``p_i - p_j``.  The communication-subgraph mixing
+    weights combine those peer estimates.  Nodes without an eligible peer keep
+    their own trajectory estimate.
     """
 
     n: int
     _relative_history: np.ndarray = field(init=False)
     _initialized: bool = field(default=False, init=False)
-    last_alpha: np.ndarray = field(init=False)
     last_effective_peer_count: np.ndarray = field(init=False)
-    last_cluster_variance: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
         self.n = int(self.n)
         if self.n < 1:
             raise ValueError("n must be positive")
         self._relative_history = np.zeros((self.n, self.n, 3), dtype=np.float64)
-        self.last_alpha = np.zeros(self.n, dtype=np.float64)
         self.last_effective_peer_count = np.zeros(self.n, dtype=np.float64)
-        self.last_cluster_variance = np.full(self.n, np.nan, dtype=np.float64)
 
     def update(
         self,
@@ -351,16 +347,12 @@ class ClusterTrajectoryLocalizer:
         consensus_steps: int = 5,
         dt: float = 1.0,
         blend_with_own: bool = True,
-        adaptive_alpha: bool = False,
-        prior_position_covariances: np.ndarray | None = None,
-        alpha_min: float = 0.0,
-        alpha_max: float = 1.0,
     ) -> np.ndarray:
         """Run one step of communication-subgraph trajectory localization.
 
         Only direct communication peers may provide a relative observation for
-        a target.  In adaptive mode, each target gets a Kalman-like fusion
-        weight from its own position variance and the peer-consensus variance.
+        a target.  With ``blend_with_own=False``, the returned state is the
+        subgraph peer estimate itself and ``alpha`` has no effect.
         """
         states = np.asarray(node_states, dtype=np.float64)
         truth = np.asarray(true_positions_for_relative_measurement, dtype=np.float64)
@@ -377,34 +369,13 @@ class ClusterTrajectoryLocalizer:
         if constraint_type not in {"vector", "range"}:
             raise ValueError("constraint_type must be 'vector' or 'range'")
         alpha = float(np.clip(alpha, 0.0, 1.0))
-        alpha_low = float(np.clip(alpha_min, 0.0, 1.0))
-        alpha_high = float(np.clip(alpha_max, alpha_low, 1.0))
         sigma = max(float(relative_noise_std), 0.0)
         steps = max(int(consensus_steps), 1)
         step_dt = max(float(dt), 1e-12)
 
-        if prior_position_covariances is None:
-            prior_variances = np.ones(self.n, dtype=np.float64)
-        else:
-            covariance = np.asarray(prior_position_covariances, dtype=np.float64)
-            if covariance.shape == (self.n, 3, 3):
-                prior_variances = np.mean(np.diagonal(covariance, axis1=1, axis2=2), axis=1)
-            elif covariance.shape == (self.n, 3):
-                prior_variances = np.mean(covariance, axis=1)
-            elif covariance.shape == (self.n,):
-                prior_variances = covariance.copy()
-            else:
-                raise ValueError(
-                    "prior_position_covariances must have shape "
-                    f"({self.n},), ({self.n}, 3) or ({self.n}, 3, 3)"
-                )
-            prior_variances = np.maximum(prior_variances, 1e-12)
-
         corrected = states.copy()
         consensus_states = states.copy()
-        self.last_alpha.fill(0.0)
         self.last_effective_peer_count.fill(0.0)
-        self.last_cluster_variance.fill(np.nan)
         for cluster_id in np.unique(labels_arr):
             ids = np.flatnonzero(labels_arr == cluster_id)
             count = ids.size
@@ -459,40 +430,46 @@ class ClusterTrajectoryLocalizer:
                 consensus_states[global_target] = consensus
 
                 effective_peers = 1.0 / max(float(np.sum(weights**2)), 1e-12)
-                peer_prior_variances = prior_variances[ids[peers]]
-                independent_variance = float(
-                    np.sum(weights**2 * (peer_prior_variances + sigma**2))
-                )
-                position_disagreement = float(
-                    np.mean(
-                        np.sum(
-                            weights[:, None]
-                            * (peer_estimates[:, :3] - consensus[:3]) ** 2,
-                            axis=0,
-                        )
-                    )
-                )
-                cluster_variance = independent_variance + position_disagreement / effective_peers
-                if adaptive_alpha:
-                    prior_variance = prior_variances[global_target]
-                    target_alpha = prior_variance / (
-                        prior_variance + cluster_variance + 1e-12
-                    )
-                    target_alpha = float(np.clip(target_alpha, alpha_low, alpha_high))
-                else:
-                    target_alpha = alpha
-
-                self.last_alpha[global_target] = target_alpha
                 self.last_effective_peer_count[global_target] = effective_peers
-                self.last_cluster_variance[global_target] = cluster_variance
                 corrected[global_target] = (
-                    (1.0 - target_alpha) * local_states[target]
-                    + target_alpha * consensus
+                    (1.0 - alpha) * local_states[target]
+                    + alpha * consensus
                 )
 
             self._relative_history[np.ix_(ids, ids)] = relative
         self._initialized = True
         return corrected if blend_with_own else consensus_states
+
+    def update_subgraph(
+        self,
+        node_states: np.ndarray,
+        weight_matrix: np.ndarray,
+        labels: np.ndarray,
+        true_positions_for_relative_measurement: np.ndarray,
+        rng: np.random.Generator,
+        relative_noise_std: float = 0.2,
+        constraint_type: str = "vector",
+        consensus_steps: int = 5,
+        dt: float = 1.0,
+    ) -> np.ndarray:
+        """Return pure communication-subgraph peer localization estimates.
+
+        This is the coefficient-free research path.  It uses the graph
+        partition, direct intra-subgraph edges and relative measurements only;
+        nodes without an eligible peer retain their own KF state.
+        """
+        return self.update(
+            node_states,
+            weight_matrix,
+            labels,
+            true_positions_for_relative_measurement,
+            rng,
+            relative_noise_std=relative_noise_std,
+            constraint_type=constraint_type,
+            consensus_steps=consensus_steps,
+            dt=dt,
+            blend_with_own=False,
+        )
 
 
 def cluster_node_trajectory_localization(

@@ -128,7 +128,7 @@ def run_single_trial(
     node_kf_prior: BatchCVKalman3D | None = None
     cluster_localizer = (
         ClusterTrajectoryLocalizer(cfg.N)
-        if cfg.enable_cluster and cfg.cluster_mode in {"localization", "node_prior"}
+        if cfg.enable_cluster and cfg.cluster_mode in {"subgraph", "localization", "node_prior"}
         else None
     )
     # UAV KF 的初始速度：用真实 UAV 速度 + 高斯噪声作为初值，对齐旧版双时间尺度
@@ -139,10 +139,8 @@ def run_single_trial(
         for method in methods
     }
     cluster_diagnostics = {
-        "alpha_mean": np.full(total_steps, np.nan, dtype=np.float64),
-        "alpha_min": np.full(total_steps, np.nan, dtype=np.float64),
-        "alpha_max": np.full(total_steps, np.nan, dtype=np.float64),
         "effective_peer_count_mean": np.full(total_steps, np.nan, dtype=np.float64),
+        "nodes_with_subgraph_peers": np.zeros(total_steps, dtype=np.int64),
     }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
         metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
@@ -370,7 +368,6 @@ def run_single_trial(
                     cluster_labels,
                     buoy_true_short,
                     rng_cluster,
-                    alpha=cfg.cluster_alpha,
                     relative_noise_std=cfg.cluster_relative_noise_std,
                     constraint_type=cfg.cluster_constraint_type,
                     consensus_steps=cfg.cluster_localization_iterations,
@@ -464,39 +461,42 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum((kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
             )
 
-            # ---- 4) Cluster 环节。默认是簇内节点定位：节点先由运动轨迹
-            #      （KF）给出自身位置先验，再用簇内导频相对位置约束修正；
-            #      DPC 对节点位置的共识只作为弱绝对先验。修正后的节点位置
-            #      再用于 UAV 相位补偿。--cluster_mode=trajectory 保留旧的
-            #      簇内 UAV 轨迹投票机制。
+            # ---- 4) Cluster 环节。默认按通信图划分子图，每个节点只接受
+            #      同一子图内、与其直接相连的邻居给出的相对定位结果；无邻居
+            #      时保留自身 KF。子图定位结果随后进入 DPC/KF-DPC 相位补偿。
+            #      --cluster_mode=localization/trajectory 保留旧兼容路径。
             if cfg.enable_cluster:
-                if cfg.cluster_mode == "localization":
+                if cfg.cluster_mode in {"subgraph", "localization"}:
                     assert cluster_localizer is not None
-                    cluster_node_state = cluster_localizer.update(
+                    localize_nodes = (
+                        cluster_localizer.update_subgraph
+                        if cfg.cluster_mode == "subgraph"
+                        else cluster_localizer.update
+                    )
+                    localization_options = {
+                        "relative_noise_std": cfg.cluster_relative_noise_std,
+                        "constraint_type": cfg.cluster_constraint_type,
+                        "consensus_steps": cfg.cluster_localization_iterations,
+                        "dt": cfg.Ts,
+                    }
+                    if cfg.cluster_mode == "localization":
+                        localization_options["alpha"] = cfg.cluster_alpha
+                    cluster_node_state = localize_nodes(
                         node_state_kf,
                         state.W_global,
                         cluster_labels,
                         buoy_true_short,
                         rng_cluster,
-                        alpha=cfg.cluster_alpha,
-                        relative_noise_std=cfg.cluster_relative_noise_std,
-                        constraint_type=cfg.cluster_constraint_type,
-                        consensus_steps=cfg.cluster_localization_iterations,
-                        dt=cfg.Ts,
-                        adaptive_alpha=cfg.cluster_alpha_mode == "adaptive",
-                        prior_position_covariances=node_kf.P[:, :3, :3],
-                        alpha_min=cfg.cluster_alpha_min,
-                        alpha_max=cfg.cluster_alpha_max,
+                        **localization_options,
                     )
                     valid_cluster_nodes = cluster_localizer.last_effective_peer_count > 0.0
                     if np.any(valid_cluster_nodes):
-                        alpha_values = cluster_localizer.last_alpha[valid_cluster_nodes]
-                        cluster_diagnostics["alpha_mean"][sidx] = float(np.mean(alpha_values))
-                        cluster_diagnostics["alpha_min"][sidx] = float(np.min(alpha_values))
-                        cluster_diagnostics["alpha_max"][sidx] = float(np.max(alpha_values))
                         cluster_diagnostics["effective_peer_count_mean"][sidx] = float(
                             np.mean(cluster_localizer.last_effective_peer_count[valid_cluster_nodes])
                         )
+                    cluster_diagnostics["nodes_with_subgraph_peers"][sidx] = int(
+                        np.count_nonzero(valid_cluster_nodes)
+                    )
                     cluster_node_est = cluster_node_state[:, :3]
                     cluster_uav_est_dfpc = uav_est_dfpc
                     cluster_dfpc_result = evaluate_dfpc(

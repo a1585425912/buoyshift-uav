@@ -205,59 +205,21 @@ class ClusterTests(unittest.TestCase):
         )
         self.assertTrue(np.all(np.isfinite(corrected)))
 
-    def test_adaptive_localizer_leaves_nodes_without_subgraph_peers_unchanged(self) -> None:
+    def test_subgraph_localizer_leaves_nodes_without_peers_unchanged(self) -> None:
         n = 4
         states = np.column_stack(
             [np.arange(n, dtype=float), np.zeros((n, 5), dtype=float)]
         )
         localizer = ClusterTrajectoryLocalizer(n)
-        corrected = localizer.update(
+        corrected = localizer.update_subgraph(
             states,
             np.eye(n),
             np.arange(n),
             states[:, :3],
             np.random.default_rng(40),
-            adaptive_alpha=True,
-            prior_position_covariances=np.ones((n, 3)) * 0.5,
         )
         np.testing.assert_allclose(corrected, states, atol=0.0)
-        np.testing.assert_allclose(localizer.last_alpha, 0.0, atol=0.0)
         np.testing.assert_allclose(localizer.last_effective_peer_count, 0.0, atol=0.0)
-
-    def test_adaptive_alpha_increases_with_target_prior_uncertainty(self) -> None:
-        n = 4
-        truth = np.column_stack([np.arange(n, dtype=float), np.zeros((n, 2))])
-        states = np.column_stack([truth, np.zeros((n, 3))])
-        W = np.full((n, n), 1.0 / n)
-        labels = np.zeros(n, dtype=int)
-        low_covariance = np.full((n, 3), 0.02)
-        high_target_covariance = low_covariance.copy()
-        high_target_covariance[0] = 1.0
-
-        low = ClusterTrajectoryLocalizer(n)
-        low.update(
-            states,
-            W,
-            labels,
-            truth,
-            np.random.default_rng(41),
-            relative_noise_std=0.2,
-            adaptive_alpha=True,
-            prior_position_covariances=low_covariance,
-        )
-        high = ClusterTrajectoryLocalizer(n)
-        high.update(
-            states,
-            W,
-            labels,
-            truth,
-            np.random.default_rng(41),
-            relative_noise_std=0.2,
-            adaptive_alpha=True,
-            prior_position_covariances=high_target_covariance,
-        )
-        self.assertGreater(high.last_alpha[0], low.last_alpha[0])
-        self.assertGreater(high.last_alpha[0], 0.8)
 
     def test_subgraph_localizer_uses_only_direct_target_peers(self) -> None:
         truth = np.column_stack([np.arange(3, dtype=float), np.zeros((3, 2))])
@@ -272,24 +234,22 @@ class ClusterTests(unittest.TestCase):
             dtype=float,
         )
         labels = np.zeros(3, dtype=int)
-        first = ClusterTrajectoryLocalizer(3).update(
+        first = ClusterTrajectoryLocalizer(3).update_subgraph(
             base_states,
             W,
             labels,
             truth,
             np.random.default_rng(42),
-            alpha=1.0,
             relative_noise_std=0.0,
         )
         changed_non_peer = base_states.copy()
         changed_non_peer[2, :3] += 1000.0
-        second = ClusterTrajectoryLocalizer(3).update(
+        second = ClusterTrajectoryLocalizer(3).update_subgraph(
             changed_non_peer,
             W,
             labels,
             truth,
             np.random.default_rng(42),
-            alpha=1.0,
             relative_noise_std=0.0,
         )
         np.testing.assert_allclose(first[0], second[0], atol=1e-12)
