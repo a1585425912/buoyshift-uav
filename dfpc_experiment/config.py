@@ -51,6 +51,9 @@ class ExperimentConfig:
     # buoy_short_*: 浮标相对慢变中心的小尺度有界扰动参数。
     # system_phase_std_deg: 额外系统相位误差，例如同步误差。
     uav_obs_noise: float = 3.0
+    # DPC consensus is a much lower-variance UAV position pseudo-measurement
+    # than one node's raw observation.
+    uav_dpc_prior_noise_std: float = 0.3
     buoy_short_radius: float = 1.0
     buoy_short_diffusion: float = 0.08
     buoy_offset_correlation_time: float = 1.2
@@ -90,6 +93,12 @@ class ExperimentConfig:
     uav_consensus_steps: int = 3
     n_clusters: int = 40
     cluster_alpha: float = 0.8
+    # adaptive: derive a per-node fusion weight from the node-KF covariance,
+    # direct communication peers and their localization disagreement.
+    # fixed: retain the legacy scalar cluster_alpha behavior.
+    cluster_alpha_mode: str = "adaptive"
+    cluster_alpha_min: float = 0.0
+    cluster_alpha_max: float = 0.95
     cluster_relative_noise_std: float = 0.2
     cluster_trajectory_noise_std: float = 0.2
     # cluster_mode:
@@ -106,7 +115,7 @@ class ExperimentConfig:
     cluster_constraint_type: str = "vector"
     cluster_localization_iterations: int = 5
     cluster_dpc_prior_weight: float = 0.1
-    uav_kf_prior_mode: str = "none"
+    uav_kf_prior_mode: str = "dpc_only"
     cluster_uav_prior_noise_std: float = 1.0
     cluster_node_prior_noise_std: float = 1.0
     # Set to False to omit the cluster trajectory-correction branches.  The
@@ -161,6 +170,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--Ts", type=float, default=ExperimentConfig.Ts)
 
     parser.add_argument("--uav_obs_noise", type=float, default=ExperimentConfig.uav_obs_noise)
+    parser.add_argument(
+        "--uav_dpc_prior_noise_std",
+        type=float,
+        default=ExperimentConfig.uav_dpc_prior_noise_std,
+    )
     parser.add_argument("--buoy_short_radius", type=float, default=ExperimentConfig.buoy_short_radius)
     parser.add_argument("--buoy_short_diffusion", type=float, default=ExperimentConfig.buoy_short_diffusion)
     parser.add_argument("--buoy_offset_correlation_time", type=float, default=ExperimentConfig.buoy_offset_correlation_time)
@@ -182,6 +196,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--uav_consensus_steps", type=int, default=ExperimentConfig.uav_consensus_steps)
     parser.add_argument("--n_clusters", type=int, default=ExperimentConfig.n_clusters)
     parser.add_argument("--cluster_alpha", type=float, default=ExperimentConfig.cluster_alpha)
+    parser.add_argument(
+        "--cluster_alpha_mode",
+        choices=["fixed", "adaptive"],
+        default=ExperimentConfig.cluster_alpha_mode,
+    )
+    parser.add_argument("--cluster_alpha_min", type=float, default=ExperimentConfig.cluster_alpha_min)
+    parser.add_argument("--cluster_alpha_max", type=float, default=ExperimentConfig.cluster_alpha_max)
     parser.add_argument(
         "--cluster_relative_noise_std",
         type=float,
@@ -272,6 +293,12 @@ def validate_config(cfg: ExperimentConfig) -> None:
         )
     if cfg.cluster_constraint_type not in {"vector", "range"}:
         raise ValueError("cluster_constraint_type must be 'vector' or 'range'")
+    if cfg.cluster_alpha_mode not in {"fixed", "adaptive"}:
+        raise ValueError("cluster_alpha_mode must be 'fixed' or 'adaptive'")
+    if not 0.0 <= cfg.cluster_alpha <= 1.0:
+        raise ValueError("cluster_alpha must be in [0, 1]")
+    if not 0.0 <= cfg.cluster_alpha_min <= cfg.cluster_alpha_max <= 1.0:
+        raise ValueError("cluster_alpha_min/max must satisfy 0 <= min <= max <= 1")
     if cfg.cluster_localization_iterations < 1:
         raise ValueError("cluster_localization_iterations must be positive")
     if cfg.uav_kf_prior_mode not in {"none", "dpc_only", "dpc_plus_cluster"}:
@@ -279,6 +306,7 @@ def validate_config(cfg: ExperimentConfig) -> None:
     nonnegative = {
         "uav_speed": cfg.uav_speed,
         "uav_obs_noise": cfg.uav_obs_noise,
+        "uav_dpc_prior_noise_std": cfg.uav_dpc_prior_noise_std,
         "buoy_short_radius": cfg.buoy_short_radius,
         "buoy_short_diffusion": cfg.buoy_short_diffusion,
         "buoy_offset_correlation_time": cfg.buoy_offset_correlation_time,
@@ -291,6 +319,8 @@ def validate_config(cfg: ExperimentConfig) -> None:
         "buoy_kf_accel_std": cfg.buoy_kf_accel_std,
         "buoy_kf_initial_velocity_std": cfg.buoy_kf_initial_velocity_std,
         "cluster_alpha": cfg.cluster_alpha,
+        "cluster_alpha_min": cfg.cluster_alpha_min,
+        "cluster_alpha_max": cfg.cluster_alpha_max,
         "cluster_relative_noise_std": cfg.cluster_relative_noise_std,
         "cluster_trajectory_noise_std": cfg.cluster_trajectory_noise_std,
         "cluster_dpc_prior_weight": cfg.cluster_dpc_prior_weight,

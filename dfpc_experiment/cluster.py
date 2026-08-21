@@ -315,23 +315,28 @@ def _relative_constraint_consensus(
 class ClusterTrajectoryLocalizer:
     """Locate node trajectories with cluster-internal observer DPC.
 
-    For each target node ``i`` in a cluster, every node in that cluster acts
-    as an observer.  Observer ``j`` forms an estimate of target ``i``'s
-    trajectory from its own trajectory plus the pilot-relative position
-    ``p_i - p_j``.  A local DPC pass over the cluster subgraph makes all
-    observer estimates of the same target agree, and the agreed trajectory is
-    blended with the target's own trajectory prior by ``alpha``.
+    For each target node ``i``, only directly connected peers in its
+    communication subgraph form estimates from their own trajectories and the
+    pilot-relative position ``p_i - p_j``.  The subgraph weights combine those
+    estimates before fixed or covariance-adaptive fusion with the target's KF
+    prior.
     """
 
     n: int
     _relative_history: np.ndarray = field(init=False)
     _initialized: bool = field(default=False, init=False)
+    last_alpha: np.ndarray = field(init=False)
+    last_effective_peer_count: np.ndarray = field(init=False)
+    last_cluster_variance: np.ndarray = field(init=False)
 
     def __post_init__(self) -> None:
         self.n = int(self.n)
         if self.n < 1:
             raise ValueError("n must be positive")
         self._relative_history = np.zeros((self.n, self.n, 3), dtype=np.float64)
+        self.last_alpha = np.zeros(self.n, dtype=np.float64)
+        self.last_effective_peer_count = np.zeros(self.n, dtype=np.float64)
+        self.last_cluster_variance = np.full(self.n, np.nan, dtype=np.float64)
 
     def update(
         self,
@@ -346,8 +351,17 @@ class ClusterTrajectoryLocalizer:
         consensus_steps: int = 5,
         dt: float = 1.0,
         blend_with_own: bool = True,
+        adaptive_alpha: bool = False,
+        prior_position_covariances: np.ndarray | None = None,
+        alpha_min: float = 0.0,
+        alpha_max: float = 1.0,
     ) -> np.ndarray:
-        """Run one step of cluster-internal trajectory localization."""
+        """Run one step of communication-subgraph trajectory localization.
+
+        Only direct communication peers may provide a relative observation for
+        a target.  In adaptive mode, each target gets a Kalman-like fusion
+        weight from its own position variance and the peer-consensus variance.
+        """
         states = np.asarray(node_states, dtype=np.float64)
         truth = np.asarray(true_positions_for_relative_measurement, dtype=np.float64)
         if states.ndim != 2 or states.shape != (self.n, 6):
@@ -363,12 +377,34 @@ class ClusterTrajectoryLocalizer:
         if constraint_type not in {"vector", "range"}:
             raise ValueError("constraint_type must be 'vector' or 'range'")
         alpha = float(np.clip(alpha, 0.0, 1.0))
+        alpha_low = float(np.clip(alpha_min, 0.0, 1.0))
+        alpha_high = float(np.clip(alpha_max, alpha_low, 1.0))
         sigma = max(float(relative_noise_std), 0.0)
         steps = max(int(consensus_steps), 1)
         step_dt = max(float(dt), 1e-12)
 
+        if prior_position_covariances is None:
+            prior_variances = np.ones(self.n, dtype=np.float64)
+        else:
+            covariance = np.asarray(prior_position_covariances, dtype=np.float64)
+            if covariance.shape == (self.n, 3, 3):
+                prior_variances = np.mean(np.diagonal(covariance, axis1=1, axis2=2), axis=1)
+            elif covariance.shape == (self.n, 3):
+                prior_variances = np.mean(covariance, axis=1)
+            elif covariance.shape == (self.n,):
+                prior_variances = covariance.copy()
+            else:
+                raise ValueError(
+                    "prior_position_covariances must have shape "
+                    f"({self.n},), ({self.n}, 3) or ({self.n}, 3, 3)"
+                )
+            prior_variances = np.maximum(prior_variances, 1e-12)
+
         corrected = states.copy()
         consensus_states = states.copy()
+        self.last_alpha.fill(0.0)
+        self.last_effective_peer_count.fill(0.0)
+        self.last_cluster_variance.fill(np.nan)
         for cluster_id in np.unique(labels_arr):
             ids = np.flatnonzero(labels_arr == cluster_id)
             count = ids.size
@@ -377,8 +413,11 @@ class ClusterTrajectoryLocalizer:
 
             local_states = states[ids]
             local_truth = truth[ids]
+            local_adjacency = W[np.ix_(ids, ids)] > 1e-12
+            np.fill_diagonal(local_adjacency, False)
             local_W = W[np.ix_(ids, ids)].copy()
             local_W /= np.maximum(local_W.sum(axis=1, keepdims=True), 1e-12)
+            mixing = np.linalg.matrix_power(local_W, steps)
 
             if constraint_type == "vector":
                 relative = local_truth[None, :, :] - local_truth[:, None, :]
@@ -405,21 +444,50 @@ class ClusterTrajectoryLocalizer:
             estimates[:, :, 3:] = local_states[:, None, 3:] + relative_velocity
 
             for target in range(count):
-                observer_estimates = estimates[:, target, :].copy()
-                # The target itself is not an observer.  Seed its row with the
-                # mean of the other observers so the DPC iteration still runs
-                # on the full cluster subgraph without injecting the target's
-                # own trajectory into the observation consensus directly.
-                observer_estimates[target] = (
-                    np.sum(observer_estimates, axis=0) - observer_estimates[target]
-                ) / max(count - 1, 1)
-                for _ in range(steps):
-                    observer_estimates = local_W @ observer_estimates
-                consensus = observer_estimates[target]
-                consensus_states[ids[target]] = consensus
-                corrected[ids[target]] = (
-                    (1.0 - alpha) * local_states[target]
-                    + alpha * consensus
+                peers = np.flatnonzero(local_adjacency[:, target])
+                if peers.size == 0:
+                    continue
+                weights = mixing[target, peers].astype(np.float64, copy=True)
+                weight_sum = float(np.sum(weights))
+                if weight_sum <= 1e-12:
+                    weights.fill(1.0 / peers.size)
+                else:
+                    weights /= weight_sum
+                peer_estimates = estimates[peers, target, :]
+                consensus = np.sum(weights[:, None] * peer_estimates, axis=0)
+                global_target = ids[target]
+                consensus_states[global_target] = consensus
+
+                effective_peers = 1.0 / max(float(np.sum(weights**2)), 1e-12)
+                peer_prior_variances = prior_variances[ids[peers]]
+                independent_variance = float(
+                    np.sum(weights**2 * (peer_prior_variances + sigma**2))
+                )
+                position_disagreement = float(
+                    np.mean(
+                        np.sum(
+                            weights[:, None]
+                            * (peer_estimates[:, :3] - consensus[:3]) ** 2,
+                            axis=0,
+                        )
+                    )
+                )
+                cluster_variance = independent_variance + position_disagreement / effective_peers
+                if adaptive_alpha:
+                    prior_variance = prior_variances[global_target]
+                    target_alpha = prior_variance / (
+                        prior_variance + cluster_variance + 1e-12
+                    )
+                    target_alpha = float(np.clip(target_alpha, alpha_low, alpha_high))
+                else:
+                    target_alpha = alpha
+
+                self.last_alpha[global_target] = target_alpha
+                self.last_effective_peer_count[global_target] = effective_peers
+                self.last_cluster_variance[global_target] = cluster_variance
+                corrected[global_target] = (
+                    (1.0 - target_alpha) * local_states[target]
+                    + target_alpha * consensus
                 )
 
             self._relative_history[np.ix_(ids, ids)] = relative

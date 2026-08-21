@@ -63,6 +63,15 @@ from .trajectory import (
 )
 
 
+def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
+    """Conservatively mix covariance after consensus with unknown correlation."""
+    weights = np.asarray(W, dtype=np.float64)
+    covariance = np.asarray(P, dtype=np.float64)
+    if weights.shape[0] != weights.shape[1] or weights.shape[0] != covariance.shape[0]:
+        raise ValueError("W and P must have matching leading dimensions")
+    return np.einsum("ij,jkl->ikl", weights, covariance)
+
+
 def run_single_trial(
     cfg: ExperimentConfig,
     seed: int,
@@ -128,6 +137,12 @@ def run_single_trial(
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
+    }
+    cluster_diagnostics = {
+        "alpha_mean": np.full(total_steps, np.nan, dtype=np.float64),
+        "alpha_min": np.full(total_steps, np.nan, dtype=np.float64),
+        "alpha_max": np.full(total_steps, np.nan, dtype=np.float64),
+        "effective_peer_count_mean": np.full(total_steps, np.nan, dtype=np.float64),
     }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
         metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
@@ -279,11 +294,11 @@ def run_single_trial(
             # single-node noise.  The dpc_only branch instead treats DPC as a
             # normal position pseudo-measurement so the KF fuses it properly.
             if cfg.uav_kf_prior_mode == "none":
-                inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_obs_noise)
+                inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std)
             else:
                 uav_kf_short.update_position_measurement(
                     uav_est_dfpc,
-                    cfg.uav_obs_noise,
+                    cfg.uav_dpc_prior_noise_std,
                 )
                 if (
                     cfg.uav_kf_prior_mode == "dpc_plus_cluster"
@@ -296,20 +311,24 @@ def run_single_trial(
             if cluster_uav_prior_est is not None and uav_kf_prior_short is not None:
                 if sidx > 0:
                     uav_kf_prior_short.predict()
-                inject_position_state(uav_kf_prior_short, uav_est_dfpc, cfg.uav_obs_noise)
+                inject_position_state(
+                    uav_kf_prior_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std
+                )
                 uav_kf_prior_short.update_position_measurement(
                     cluster_uav_prior_est,
                     cfg.cluster_uav_prior_noise_std,
                 )
             z_u_short_kf = p_u_true + rng_obs.normal(0.0, cfg.uav_obs_noise, size=(cfg.N, 3))
-            uav_kf_short.update(z_u_short_kf)
-            if uav_kf_prior_short is not None:
-                uav_kf_prior_short.update(z_u_short_kf)
+            if sidx > 0:
+                uav_kf_short.update(z_u_short_kf)
+                if uav_kf_prior_short is not None:
+                    uav_kf_prior_short.update(z_u_short_kf)
             uav_state_short_kf = uav_kf_short.x.copy()
             uav_state_short_kf = backend.consensus_linear_accel(
                 state.W_global, state.W_global_gpu, uav_state_short_kf, 1
             )
             uav_kf_short.x = uav_state_short_kf.copy()
+            uav_kf_short.P = consensus_covariance(state.W_global, uav_kf_short.P)
             uav_est_kf = uav_state_short_kf[:, :3]
             kf_velocity = uav_state_short_kf[:, 3:]
             cluster_uav_est_kf = uav_est_kf
@@ -323,6 +342,9 @@ def run_single_trial(
                     1,
                 )
                 uav_kf_prior_short.x = uav_prior_state.copy()
+                uav_kf_prior_short.P = consensus_covariance(
+                    state.W_global, uav_kf_prior_short.P
+                )
                 cluster_uav_est_kf = uav_prior_state[:, :3]
                 cluster_kf_velocity = uav_prior_state[:, 3:]
 
@@ -331,13 +353,15 @@ def run_single_trial(
             if sidx > 0:
                 node_kf.predict()
             z_b_short_kf = buoy_true_short + rng_obs.normal(0.0, cfg.buoy_center_obs_noise, size=(cfg.N, 3))
-            node_kf.update(z_b_short_kf)
+            if sidx > 0:
+                node_kf.update(z_b_short_kf)
             node_state_kf = node_kf.x.copy()
             node_est_kf = node_state_kf[:, :3]
             if node_kf_prior is not None:
                 if sidx > 0:
                     node_kf_prior.predict()
-                node_kf_prior.update(z_b_short_kf)
+                if sidx > 0:
+                    node_kf_prior.update(z_b_short_kf)
                 node_state_kf_prior = node_kf_prior.x.copy()
                 assert cluster_localizer is not None
                 cluster_node_consensus = cluster_localizer.update(
@@ -459,7 +483,20 @@ def run_single_trial(
                         constraint_type=cfg.cluster_constraint_type,
                         consensus_steps=cfg.cluster_localization_iterations,
                         dt=cfg.Ts,
+                        adaptive_alpha=cfg.cluster_alpha_mode == "adaptive",
+                        prior_position_covariances=node_kf.P[:, :3, :3],
+                        alpha_min=cfg.cluster_alpha_min,
+                        alpha_max=cfg.cluster_alpha_max,
                     )
+                    valid_cluster_nodes = cluster_localizer.last_effective_peer_count > 0.0
+                    if np.any(valid_cluster_nodes):
+                        alpha_values = cluster_localizer.last_alpha[valid_cluster_nodes]
+                        cluster_diagnostics["alpha_mean"][sidx] = float(np.mean(alpha_values))
+                        cluster_diagnostics["alpha_min"][sidx] = float(np.min(alpha_values))
+                        cluster_diagnostics["alpha_max"][sidx] = float(np.max(alpha_values))
+                        cluster_diagnostics["effective_peer_count_mean"][sidx] = float(
+                            np.mean(cluster_localizer.last_effective_peer_count[valid_cluster_nodes])
+                        )
                     cluster_node_est = cluster_node_state[:, :3]
                     cluster_uav_est_dfpc = uav_est_dfpc
                     cluster_dfpc_result = evaluate_dfpc(
@@ -707,6 +744,7 @@ def run_single_trial(
             uav_kf_long.x,
             1,
         ).copy()
+        uav_kf_long.P = consensus_covariance(state.W_global, uav_kf_long.P)
 
     return {
         "metrics": metrics,
@@ -718,6 +756,7 @@ def run_single_trial(
         "trial_index": trial_index,
         "seed": seed,
         "physical_duration_s": (total_steps - 1) * float(cfg.Ts),
+        "cluster_diagnostics": cluster_diagnostics,
     }
 
 
@@ -741,10 +780,13 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
     }
+    cluster_diagnostics = {
+        key: mean_stack([res["cluster_diagnostics"][key] for res in trials])
+        for key in trials[0]["cluster_diagnostics"]
+    }
     for method in methods:
         # 功率类指标必须先在线性域平均，再转成 dB。
         for key in [
-            "gain_linear",
             "power_linear",
             "ideal_power_linear",
             "single_node_mean_power_linear",
@@ -752,6 +794,10 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         ]:
             stack = np.stack([res["metrics"][method][key] for res in trials], axis=0)
             metrics[method][key] = np.mean(stack, axis=0)
+        metrics[method]["gain_linear"] = (
+            metrics[method]["power_linear"]
+            / np.maximum(metrics[method]["ideal_power_linear"], 1e-30)
+        )
         metrics[method]["norm_db"] = 10.0 * np.log10(np.maximum(metrics[method]["gain_linear"], 1e-30))
         metrics[method]["gain_over_single_mean_linear"] = (
             metrics[method]["power_linear"] / np.maximum(metrics[method]["single_node_mean_power_linear"], 1e-30)
@@ -874,4 +920,5 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "physical_duration_s": trials[0]["physical_duration_s"],
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
+        "cluster_diagnostics": cluster_diagnostics,
     }
