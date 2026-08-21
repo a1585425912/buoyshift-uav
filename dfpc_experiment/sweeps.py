@@ -19,9 +19,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .config import ExperimentConfig
-from .constants import METHOD_DFPC, METHOD_KF_DFPC, METHOD_NO_ALG, METHOD_RANDOM_REFERENCE
+from .constants import (
+    METHOD_CLUSTER_DFPC,
+    METHOD_CLUSTER_KF_DFPC,
+    METHOD_DFPC,
+    METHOD_KF_DFPC,
+    METHOD_NO_ALG,
+    METHOD_RANDOM_REFERENCE,
+)
 from .experiment import run_experiment
 from .io_utils import write_rows
+
+
+PERFORMANCE_METHODS = [
+    (METHOD_DFPC, "dfpc"),
+    (METHOD_KF_DFPC, "kf_dfpc"),
+    (METHOD_CLUSTER_DFPC, "cluster_dfpc"),
+    (METHOD_CLUSTER_KF_DFPC, "cluster_kf_dfpc"),
+]
 
 
 def parse_float_list(text: str) -> list[float]:
@@ -52,7 +67,7 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
     reference_tail_power = float(np.mean(metrics[METHOD_RANDOM_REFERENCE]["power_linear"][tail]))
     single_mean_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_mean_power_linear"][tail]))
     single_best_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_best_power_linear"][tail]))
-    return {
+    row = {
         "factor": factor,
         "factor_value": value,
         "factor_label": label,
@@ -105,6 +120,124 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "kf_dfpc_final_phase_rmse_deg": float(metrics[METHOD_KF_DFPC]["phase_rmse_deg"][-1]),
         "kf_dfpc_final_distance_rmse_m": float(metrics[METHOD_KF_DFPC]["distance_rmse"][-1]),
     }
+    for method, prefix in PERFORMANCE_METHODS[2:]:
+        method_tail_gain = float(np.mean(metrics[method]["gain_linear"][tail]))
+        method_tail_power = float(np.mean(metrics[method]["power_linear"][tail]))
+        row.update(
+            {
+                f"{prefix}_tail_power_db": float(
+                    10.0 * np.log10(max(method_tail_gain, 1e-30))
+                ),
+                f"{prefix}_gain_over_single_mean_db": float(
+                    10.0
+                    * np.log10(
+                        max(method_tail_power / max(single_mean_tail_power, 1e-30), 1e-30)
+                    )
+                ),
+                f"{prefix}_tail_phase_std_deg": float(
+                    np.nanmean(metrics[method]["phase_std_deg"][tail])
+                ),
+                f"{prefix}_tail_phase_rmse_deg": float(
+                    np.nanmean(metrics[method]["phase_rmse_deg"][tail])
+                ),
+                f"{prefix}_tail_distance_rmse_m": float(
+                    np.nanmean(metrics[method]["distance_rmse"][tail])
+                ),
+                f"{prefix}_tail_node_rmse_m": float(
+                    np.nanmean(metrics[method]["node_rmse"][tail])
+                ),
+                f"{prefix}_tail_uav_rmse_m": float(
+                    np.nanmean(metrics[method]["uav_rmse"][tail])
+                ),
+                f"{prefix}_final_power_db": float(metrics[method]["norm_db"][-1]),
+                f"{prefix}_final_phase_std_deg": float(metrics[method]["phase_std_deg"][-1]),
+                f"{prefix}_final_distance_rmse_m": float(metrics[method]["distance_rmse"][-1]),
+            }
+        )
+    return row
+
+
+def convergence_summary(
+    res: dict[str, Any],
+    method: str,
+    tolerance_db: float = 0.5,
+) -> dict[str, float | int]:
+    """Measure sustained convergence to a method's own steady-state band."""
+    gain = np.asarray(res["metrics"][method]["gain_linear"], dtype=np.float64)
+    total = gain.size
+    window = max(1, min(int(res["args"]["K"]), total))
+    tail = slice(int(0.8 * total), None)
+    tail_db = float(10.0 * np.log10(max(float(np.mean(gain[tail])), 1e-30)))
+    rolling = np.convolve(gain, np.ones(window) / window, mode="valid")
+    rolling_db = 10.0 * np.log10(np.maximum(rolling, 1e-30))
+    threshold = tail_db - float(tolerance_db)
+    hold = max(2, min(window // 2, rolling_db.size))
+    convergence_step = total
+    for index in range(rolling_db.size - hold + 1):
+        if np.all(rolling_db[index : index + hold] >= threshold):
+            convergence_step = index + window - 1
+            break
+    norm_db = 10.0 * np.log10(np.maximum(gain, 1e-30))
+    transient_end = max(1, total // 2)
+    transient_deficit = np.maximum(tail_db - norm_db[:transient_end], 0.0)
+    return {
+        "tail_power_db": tail_db,
+        "convergence_step_05db": convergence_step,
+        "convergence_time_s_05db": convergence_step * float(res["args"]["Ts"]),
+        "transient_deficit_mean_db": float(np.mean(transient_deficit)),
+        "first_block_power_db": float(
+            10.0 * np.log10(max(float(np.mean(gain[:window])), 1e-30))
+        ),
+    }
+
+
+def _fit_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    slope, intercept = np.polyfit(x, y, 1)
+    fitted = slope * x + intercept
+    residual = float(np.sum((y - fitted) ** 2))
+    total = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = 1.0 if total <= 1e-15 else 1.0 - residual / total
+    return float(slope), float(r_squared)
+
+
+def node_count_scaling_diagnostics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Distinguish suspicious linear-in-N growth from expected log scaling."""
+    group = sorted(rows, key=lambda row: float(row["factor_value"]))
+    nodes = np.array([float(row["factor_value"]) for row in group], dtype=np.float64)
+    log_nodes = np.log10(nodes)
+    diagnostics = []
+    for method, prefix in PERFORMANCE_METHODS:
+        power_key = f"{prefix}_tail_power_db"
+        gain_key = (
+            "dfpc_tail_gain_over_single_mean_db"
+            if prefix == "dfpc"
+            else f"{prefix}_gain_over_single_mean_db"
+        )
+        power = np.array([float(row[power_key]) for row in group], dtype=np.float64)
+        gain = np.array([float(row[gain_key]) for row in group], dtype=np.float64)
+        linear_slope, linear_r2 = _fit_line(nodes, power)
+        log_slope, log_r2 = _fit_line(log_nodes, power)
+        gain_slope, gain_r2 = _fit_line(log_nodes, gain)
+        span = float(np.max(power) - np.min(power))
+        diagnostics.append(
+            {
+                "method": method,
+                "node_count_min": int(nodes[0]),
+                "node_count_max": int(nodes[-1]),
+                "normalized_power_span_db": span,
+                "linear_slope_db_per_1000_nodes": 1000.0 * linear_slope,
+                "linear_fit_r2": linear_r2,
+                "log_fit_slope_db_per_decade": log_slope,
+                "log_fit_r2": log_r2,
+                "gain_slope_db_per_decade": gain_slope,
+                "gain_log_fit_r2": gain_r2,
+                "gain_slope_error_from_20_db": gain_slope - 20.0,
+                "suspicious_linear_growth": bool(
+                    span > 1.0 and linear_r2 >= 0.95 and linear_r2 > log_r2 + 0.02
+                ),
+            }
+        )
+    return diagnostics
 
 
 def sweep_points(factor: str, values: str) -> list[tuple[float, str, dict[str, Any]]]:
@@ -138,6 +271,8 @@ def run_factor(
     rows = []
     trial_diagnostics: list[dict[str, Any]] = []
     block_diagnostics: list[dict[str, Any]] = []
+    connectivity_diagnostics: list[dict[str, Any]] = []
+    connectivity_time_rows: list[dict[str, Any]] = []
     for idx, (value, label, overrides) in enumerate(sweep_points(factor, values)):
         point_dir = out_dir / factor / f"point_{idx:02d}"
         point_cfg = replace(cfg, out_dir=str(point_dir))
@@ -157,11 +292,40 @@ def run_factor(
         }
         trial_diagnostics.extend([{**common, **row} for row in res["trial_summary_rows"]])
         block_diagnostics.extend([{**common, **row} for row in res["trial_block_rows"]])
+        if factor == "connectivity":
+            for method, _ in PERFORMANCE_METHODS:
+                connectivity_diagnostics.append(
+                    {
+                        **common,
+                        "method": method,
+                        **convergence_summary(res, method),
+                    }
+                )
+                for step, power_db in enumerate(res["metrics"][method]["norm_db"]):
+                    connectivity_time_rows.append(
+                        {
+                            **common,
+                            "method": method,
+                            "global_step": step,
+                            "physical_time_s": step * float(res["args"]["Ts"]),
+                            "normalized_power_db": float(power_db),
+                        }
+                    )
         if point_cfg.debug:
             res["debug_recorder"].write(point_dir)
     write_rows(out_dir / f"{factor}_summary.csv", rows)
     write_rows(out_dir / f"{factor}_trial_diagnostics.csv", trial_diagnostics)
     write_rows(out_dir / f"{factor}_block_trial_diagnostics.csv", block_diagnostics)
+    if factor == "node_count":
+        write_rows(
+            out_dir / "node_count_scaling_diagnostics.csv",
+            node_count_scaling_diagnostics(rows),
+        )
+    if factor == "connectivity":
+        write_rows(out_dir / "connectivity_convergence_summary.csv", connectivity_diagnostics)
+        write_rows(out_dir / "connectivity_time_curves.csv", connectivity_time_rows)
+        plot_connectivity_convergence(connectivity_diagnostics, out_dir)
+        plot_connectivity_time_curves(connectivity_time_rows, out_dir)
     if factor == "frequency":
         events = detect_frequency_rebounds(rows, trial_diagnostics, rebound_threshold_db)
         write_rows(out_dir / "frequency_rebound_events.csv", events)
@@ -180,6 +344,8 @@ def detect_frequency_rebounds(
     method_specs = [
         (METHOD_DFPC, "dfpc"),
         (METHOD_KF_DFPC, "kf_dfpc"),
+        (METHOD_CLUSTER_DFPC, "cluster_dfpc"),
+        (METHOD_CLUSTER_KF_DFPC, "cluster_kf_dfpc"),
     ]
     events: list[dict[str, Any]] = []
     for method, prefix in method_specs:
@@ -193,8 +359,16 @@ def detect_frequency_rebounds(
             (
                 "tail",
                 f"{prefix}_tail_power_db",
-                f"{prefix}_phase_std_deg" if prefix == "kf_dfpc" else "dfpc_tail_phase_std_deg",
-                f"{prefix}_distance_rmse_m" if prefix == "kf_dfpc" else "dfpc_tail_distance_rmse_m",
+                (
+                    f"{prefix}_phase_std_deg"
+                    if prefix == "kf_dfpc"
+                    else f"{prefix}_tail_phase_std_deg"
+                ),
+                (
+                    f"{prefix}_distance_rmse_m"
+                    if prefix == "kf_dfpc"
+                    else f"{prefix}_tail_distance_rmse_m"
+                ),
             ),
         ]:
             trial_key = f"{statistic}_power_db"
@@ -326,6 +500,55 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         plt.savefig(out_dir / filename, dpi=220)
         plt.close()
 
+    comparison_specs = [
+        (
+            [
+                "dfpc_tail_power_db",
+                "kf_dfpc_tail_power_db",
+                "cluster_dfpc_tail_power_db",
+                "cluster_kf_dfpc_tail_power_db",
+            ],
+            "Tail normalized power (dB)",
+            f"{factor}_all_methods_tail_power_db.png",
+        ),
+        (
+            [
+                "dfpc_tail_phase_std_deg",
+                "kf_dfpc_phase_std_deg",
+                "cluster_dfpc_tail_phase_std_deg",
+                "cluster_kf_dfpc_tail_phase_std_deg",
+            ],
+            "Tail residual phase std (deg)",
+            f"{factor}_all_methods_phase_std_deg.png",
+        ),
+        (
+            [
+                "dfpc_tail_node_rmse_m",
+                "kf_dfpc_node_rmse_m",
+                "cluster_dfpc_tail_node_rmse_m",
+                "cluster_kf_dfpc_tail_node_rmse_m",
+            ],
+            "Tail node RMSE (m)",
+            f"{factor}_all_methods_node_rmse.png",
+        ),
+    ]
+    labels = [method for method, _ in PERFORMANCE_METHODS]
+    for keys, ylabel, filename in comparison_specs:
+        plt.figure(figsize=(10.4, 5.8))
+        for key, method_label in zip(keys, labels):
+            ys = np.array([float(row[key]) for row in group], dtype=np.float64)
+            plt.plot(xs, ys, marker="o", linewidth=2.0, label=method_label)
+        if factor == "node_count":
+            plt.xscale("log")
+        plt.xlabel(factor.replace("_", " "))
+        plt.ylabel(ylabel)
+        plt.title(f"All-method comparison: {factor.replace('_', ' ')}")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir / filename, dpi=220)
+        plt.close()
+
     if factor == "frequency":
         comparison_specs = [
             (
@@ -356,3 +579,77 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
             plt.tight_layout()
             plt.savefig(out_dir / filename, dpi=220)
             plt.close()
+
+
+def plot_connectivity_convergence(rows: list[dict[str, Any]], out_dir: Path) -> None:
+    """Plot sustained convergence time and transient deficit versus connectivity."""
+    if not rows:
+        return
+    for key, ylabel, filename in [
+        (
+            "convergence_time_s_05db",
+            "Time to sustained 0.5 dB steady-state band (s)",
+            "connectivity_all_methods_convergence_time.png",
+        ),
+        (
+            "transient_deficit_mean_db",
+            "Mean first-half transient deficit (dB)",
+            "connectivity_all_methods_transient_deficit.png",
+        ),
+    ]:
+        plt.figure(figsize=(10.4, 5.8))
+        for method, _ in PERFORMANCE_METHODS:
+            method_rows = sorted(
+                (row for row in rows if row["method"] == method),
+                key=lambda row: float(row["factor_value"]),
+            )
+            plt.plot(
+                [float(row["factor_value"]) for row in method_rows],
+                [float(row[key]) for row in method_rows],
+                marker="o",
+                linewidth=2.0,
+                label=method,
+            )
+        plt.xscale("log")
+        plt.xlabel("communication-edge probability")
+        plt.ylabel(ylabel)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir / filename, dpi=220)
+        plt.close()
+
+
+def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> None:
+    """Plot low/medium/high connectivity time curves for each research method."""
+    if not rows:
+        return
+    connectivities = sorted({float(row["factor_value"]) for row in rows})
+    selected = {connectivities[0], connectivities[len(connectivities) // 2], connectivities[-1]}
+    figure, axes = plt.subplots(2, 2, figsize=(13.0, 8.4), sharex=True)
+    for axis, (method, _) in zip(axes.flat, PERFORMANCE_METHODS):
+        for connectivity in sorted(selected):
+            curve = sorted(
+                (
+                    row
+                    for row in rows
+                    if row["method"] == method
+                    and float(row["factor_value"]) == connectivity
+                ),
+                key=lambda row: int(row["global_step"]),
+            )
+            axis.plot(
+                [float(row["physical_time_s"]) for row in curve],
+                [float(row["normalized_power_db"]) for row in curve],
+                linewidth=1.8,
+                label=f"p={connectivity:g}",
+            )
+        axis.set_title(method)
+        axis.set_ylabel("normalized power (dB)")
+        axis.grid(True, alpha=0.3)
+        axis.legend()
+    axes[-1, 0].set_xlabel("physical time (s)")
+    axes[-1, 1].set_xlabel("physical time (s)")
+    figure.tight_layout()
+    figure.savefig(out_dir / "connectivity_selected_time_curves.png", dpi=220)
+    plt.close(figure)
