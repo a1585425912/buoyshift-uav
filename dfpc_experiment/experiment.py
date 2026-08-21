@@ -64,18 +64,20 @@ from .trajectory import (
 
 
 def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
-    """Return the covariance of a doubly-stochastic linear consensus update.
+    """Conservatively mix covariances after a linear consensus update.
 
-    For ``x_new[i] = sum_j W[i, j] x[j]`` with independent per-node states,
-    the consensus covariance is ``P_new[i] = sum_j W[i, j]^2 P[j]``.  This
-    keeps the filter covariance consistent with the state that was just
-    overwritten by ``consensus_linear_accel``.
+    Repeated consensus makes node estimation errors correlated.  Because this
+    filter does not track the cross-covariances, the independent-error formula
+    ``sum_j W[i, j]^2 P[j]`` becomes overconfident and eventually suppresses
+    measurement updates.  For non-negative row-stochastic weights,
+    ``sum_j W[i, j] P[j]`` is a conservative directional-variance bound under
+    unknown cross-correlation and preserves identical covariances.
     """
     W = np.asarray(W, dtype=np.float64)
     P = np.asarray(P, dtype=np.float64)
     if W.shape[0] != W.shape[1] or W.shape[0] != P.shape[0]:
         raise ValueError("W and P must have matching leading dimensions")
-    return np.einsum("ij,jkl->ikl", W**2, P)
+    return np.einsum("ij,jkl->ikl", W, P)
 
 
 def run_single_trial(

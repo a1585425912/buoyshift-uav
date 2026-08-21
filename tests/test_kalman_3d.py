@@ -12,7 +12,7 @@ from dfpc_experiment.scenario import current_truth, init_scene, observe_position
 
 
 class Kalman3DTests(unittest.TestCase):
-    def test_consensus_covariance_matches_doubly_stochastic_state_update(self) -> None:
+    def test_consensus_covariance_is_conservative_for_unknown_correlation(self) -> None:
         W = np.array([[0.5, 0.5], [0.5, 0.5]], dtype=float)
         P = np.array(
             [
@@ -23,12 +23,28 @@ class Kalman3DTests(unittest.TestCase):
         )
         expected = np.array(
             [
-                [[0.75, 0.0], [0.0, 0.75]],
-                [[0.75, 0.0], [0.0, 0.75]],
+                [[1.5, 0.0], [0.0, 1.5]],
+                [[1.5, 0.0], [0.0, 1.5]],
             ],
             dtype=float,
         )
         np.testing.assert_allclose(consensus_covariance(W, P), expected, atol=1e-12)
+
+    def test_paper_scale_kf_consensus_does_not_become_overconfident(self) -> None:
+        cfg = ExperimentConfig(
+            N=100,
+            fc_mhz=30.0,
+            T_long=4,
+            K=10,
+            mc_trials=1,
+            device="cpu",
+        )
+        result = run_experiment(cfg)
+        tail = slice(int(0.8 * result["total_steps"]), None)
+        dfpc = result["metrics"][METHOD_DFPC]
+        kf_dfpc = result["metrics"][METHOD_KF_DFPC]
+        self.assertGreater(np.mean(kf_dfpc["gain_linear"][tail]), np.mean(dfpc["gain_linear"][tail]))
+        self.assertLess(np.mean(kf_dfpc["uav_rmse"][tail]), 1.0)
 
     def test_noiseless_constant_velocity_prediction_in_three_dimensions(self) -> None:
         initial = np.array([[1.0, 2.0, 3.0], [-2.0, 4.0, 1.0]])
