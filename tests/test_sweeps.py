@@ -8,6 +8,7 @@ from dfpc_experiment.config import ExperimentConfig
 from dfpc_experiment.constants import METHOD_CLUSTER_KF_DFPC
 from dfpc_experiment.experiment import run_experiment
 from dfpc_experiment.sweeps import (
+    controlled_node_settings,
     convergence_summary,
     node_count_scaling_diagnostics,
     summarize_result,
@@ -15,6 +16,13 @@ from dfpc_experiment.sweeps import (
 
 
 class SweepTests(unittest.TestCase):
+    def test_controlled_node_settings_hold_degree_and_cluster_size(self) -> None:
+        for node_count in [20, 100, 2000]:
+            settings = controlled_node_settings(node_count, 8.0, 10)
+            expected_degree = 2.0 + (node_count - 3) * settings["global_connectivity"]
+            self.assertAlmostEqual(expected_degree, 8.0)
+            self.assertEqual(settings["n_clusters"], int(np.ceil(node_count / 10)))
+
     def test_summary_contains_subgraph_cluster_methods(self) -> None:
         result = run_experiment(
             ExperimentConfig(
@@ -31,6 +39,7 @@ class SweepTests(unittest.TestCase):
         for key in [
             "cluster_dfpc_tail_power_db",
             "cluster_kf_dfpc_tail_power_db",
+            "node_kf_dfpc_tail_power_db",
             "cluster_dfpc_tail_node_rmse_m",
             "cluster_kf_dfpc_tail_node_rmse_m",
         ]:
@@ -48,17 +57,19 @@ class SweepTests(unittest.TestCase):
                 {
                     "factor_value": node_count,
                     "dfpc_tail_power_db": power,
+                    "node_kf_dfpc_tail_power_db": power,
                     "kf_dfpc_tail_power_db": power,
                     "cluster_dfpc_tail_power_db": power,
                     "cluster_kf_dfpc_tail_power_db": power,
                     "dfpc_tail_gain_over_single_mean_db": gain,
+                    "node_kf_dfpc_gain_over_single_mean_db": gain,
                     "kf_dfpc_gain_over_single_mean_db": gain,
                     "cluster_dfpc_gain_over_single_mean_db": gain,
                     "cluster_kf_dfpc_gain_over_single_mean_db": gain,
                 }
             )
         diagnostics = node_count_scaling_diagnostics(rows)
-        self.assertEqual(len(diagnostics), 4)
+        self.assertEqual(len(diagnostics), 5)
         self.assertTrue(all(row["suspicious_linear_growth"] for row in diagnostics))
         self.assertTrue(
             all(abs(row["gain_slope_error_from_20_db"]) < 1e-10 for row in diagnostics)

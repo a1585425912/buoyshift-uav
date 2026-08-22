@@ -32,6 +32,7 @@ from .constants import (
     METHOD_CLUSTER_KF_DFPC,
     METHOD_DFPC,
     METHOD_KF_DFPC,
+    METHOD_NODE_KF_DFPC,
     METHOD_NO_ALG,
     METHOD_RANDOM_REFERENCE,
     METHODS,
@@ -85,7 +86,10 @@ def run_single_trial(
     """
     rng_scene = np.random.default_rng(seed)
     rng_obs = np.random.default_rng(seed + 3000003)
-    rng_cluster = np.random.default_rng(seed + 4000003)
+    rng_cluster_partition = np.random.default_rng(seed + 4000003)
+    # Keep graph-partition traversal from shifting the relative-measurement
+    # noise stream when connectivity changes.
+    rng_cluster_measurement = np.random.default_rng(seed + 5000003)
 
     fc_hz = float(cfg.fc_mhz) * 1e6
     lam = 3e8 / fc_hz
@@ -100,11 +104,21 @@ def run_single_trial(
         communication_graph_clusters(
             state.W_global,
             cfg.n_clusters,
-            rng_cluster,
+            rng_cluster_partition,
         )
         if cfg.enable_cluster
         else None
     )
+    adjacency = state.W_global > 1e-12
+    np.fill_diagonal(adjacency, False)
+    cluster_sizes = (
+        np.bincount(cluster_labels) if cluster_labels is not None else np.array([], dtype=np.int64)
+    )
+    graph_diagnostics = {
+        "mean_degree": float(np.mean(np.sum(adjacency, axis=1))),
+        "cluster_count": float(cluster_sizes.size),
+        "mean_cluster_size": float(np.mean(cluster_sizes)) if cluster_sizes.size else np.nan,
+    }
     # System/calibration phase error is persistent over one trial.  Drawing a
     # new independent value at every short step creates non-physical power
     # zigzags even when the geometry moves smoothly.
@@ -260,7 +274,7 @@ def run_single_trial(
                     cluster_labels,
                     consensus_steps=cfg.cluster_localization_iterations,
                     noise_std=cfg.cluster_trajectory_noise_std,
-                    rng=rng_cluster,
+                    rng=rng_cluster_measurement,
                 )
                 cluster_prior_line_params = normalize_trajectory_directions(
                     cluster_prior_line_params
@@ -367,7 +381,7 @@ def run_single_trial(
                     state.W_global,
                     cluster_labels,
                     buoy_true_short,
-                    rng_cluster,
+                    rng_cluster_measurement,
                     relative_noise_std=cfg.cluster_relative_noise_std,
                     constraint_type=cfg.cluster_constraint_type,
                     consensus_steps=cfg.cluster_localization_iterations,
@@ -440,6 +454,23 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum(velocity_error**2, axis=1)))
             )
 
+            # Ablation: DPC UAV estimate plus Node-KF, without clustering.
+            node_kf_dfpc_result = evaluate_dfpc(
+                uav_est_dfpc,
+                node_est_kf,
+                p_u_true,
+                buoy_true_short,
+                phi_true,
+                amp,
+                eps,
+                k_const,
+                p_ideal,
+                p_single_mean,
+                p_single_best,
+            )
+            node_kf_dfpc_result["uav_line_intercept_rmse"] = dfpc_result["uav_line_intercept_rmse"]
+            node_kf_dfpc_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
+
             # 短时间尺度 KF 方法的指标：位置用短尺度 UAV/节点 KF 后验。
             kf_result = evaluate_dfpc(
                 uav_est_kf,
@@ -486,7 +517,7 @@ def run_single_trial(
                         state.W_global,
                         cluster_labels,
                         buoy_true_short,
-                        rng_cluster,
+                        rng_cluster_measurement,
                         **localization_options,
                     )
                     valid_cluster_nodes = cluster_localizer.last_effective_peer_count > 0.0
@@ -612,7 +643,7 @@ def run_single_trial(
                     cluster_line_params = rotating_cluster_trajectory_correction(
                         line_params_dfpc,
                         cluster_labels,
-                        rng_cluster,
+                        rng_cluster_measurement,
                         cfg.cluster_alpha,
                         cfg.cluster_trajectory_noise_std,
                     )
@@ -652,7 +683,7 @@ def run_single_trial(
                     cluster_kf_line_params = rotating_cluster_trajectory_correction(
                         cluster_kf_line_params,
                         cluster_labels,
-                        rng_cluster,
+                        rng_cluster_measurement,
                         cfg.cluster_alpha,
                         cfg.cluster_trajectory_noise_std,
                     )
@@ -684,6 +715,7 @@ def run_single_trial(
                 METHOD_RANDOM_REFERENCE: random_reference_result,
                 METHOD_NO_ALG: no_alg_result,
                 METHOD_DFPC: dfpc_result,
+                METHOD_NODE_KF_DFPC: node_kf_dfpc_result,
                 METHOD_KF_DFPC: kf_result,
             }
             if cfg.enable_cluster:
@@ -757,6 +789,7 @@ def run_single_trial(
         "seed": seed,
         "physical_duration_s": (total_steps - 1) * float(cfg.Ts),
         "cluster_diagnostics": cluster_diagnostics,
+        "graph_diagnostics": graph_diagnostics,
     }
 
 
@@ -783,6 +816,10 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     cluster_diagnostics = {
         key: mean_stack([res["cluster_diagnostics"][key] for res in trials])
         for key in trials[0]["cluster_diagnostics"]
+    }
+    graph_diagnostics = {
+        key: float(np.nanmean([res["graph_diagnostics"][key] for res in trials]))
+        for key in trials[0]["graph_diagnostics"]
     }
     for method in methods:
         # 功率类指标必须先在线性域平均，再转成 dB。
@@ -921,4 +958,5 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
         "cluster_diagnostics": cluster_diagnostics,
+        "graph_diagnostics": graph_diagnostics,
     }

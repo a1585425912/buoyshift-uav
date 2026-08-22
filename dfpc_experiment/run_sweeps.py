@@ -29,7 +29,7 @@ DEFAULT_VALUES = {
 }
 
 
-def parse_args() -> tuple[ExperimentConfig, list[str], dict[str, str], float]:
+def parse_args() -> tuple[ExperimentConfig, list[str], dict[str, str], float, bool, float, int]:
     parser = argparse.ArgumentParser(description="Modular DPC factor sweeps")
     add_common_args(parser)
     parser.add_argument("--factors", type=str, default="node_count,connectivity,frequency,node_position_noise,uav_position_error,wave_speed")
@@ -39,25 +39,44 @@ def parse_args() -> tuple[ExperimentConfig, list[str], dict[str, str], float]:
         default=0.5,
         help="adjacent-frequency power increase that triggers a diagnostic event",
     )
+    parser.add_argument(
+        "--controlled_design",
+        action="store_true",
+        help="hold expected degree and cluster size fixed in node-count sweeps",
+    )
+    parser.add_argument("--target_mean_degree", type=float, default=8.0)
+    parser.add_argument("--target_cluster_size", type=int, default=10)
     for factor, default in DEFAULT_VALUES.items():
         parser.add_argument(f"--{factor}_values", type=str, default=default)
     ns = parser.parse_args()
     factors = [x.strip() for x in ns.factors.split(",") if x.strip()]
     values = {factor: getattr(ns, f"{factor}_values") for factor in DEFAULT_VALUES}
     ns_dict = vars(ns)
+    controlled_design = bool(ns_dict.pop("controlled_design"))
+    target_mean_degree = float(ns_dict.pop("target_mean_degree"))
+    target_cluster_size = int(ns_dict.pop("target_cluster_size"))
     ns_dict["enable_cluster"] = not bool(ns_dict.pop("disable_cluster", False))
     cfg_keys = ExperimentConfig.__dataclass_fields__.keys()
     cfg = ExperimentConfig(**{key: ns_dict[key] for key in cfg_keys})
-    return cfg, factors, values, float(ns.rebound_threshold_db)
+    return cfg, factors, values, float(ns.rebound_threshold_db), controlled_design, target_mean_degree, target_cluster_size
 
 
 def main() -> None:
-    cfg, factors, values, rebound_threshold_db = parse_args()
+    cfg, factors, values, rebound_threshold_db, controlled_design, target_mean_degree, target_cluster_size = parse_args()
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     all_rows = []
     for factor in factors:
-        rows = run_factor(cfg, factor, values[factor], out_dir, rebound_threshold_db)
+        rows = run_factor(
+            cfg,
+            factor,
+            values[factor],
+            out_dir,
+            rebound_threshold_db,
+            controlled_design,
+            target_mean_degree,
+            target_cluster_size,
+        )
         all_rows.extend(rows)
     write_rows(out_dir / "modular_dfpc_factor_sweeps_summary.csv", all_rows)
     print(f"Modular factor sweep outputs saved to: {out_dir}")

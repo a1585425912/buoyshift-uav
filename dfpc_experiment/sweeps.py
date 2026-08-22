@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from .constants import (
     METHOD_CLUSTER_KF_DFPC,
     METHOD_DFPC,
     METHOD_KF_DFPC,
+    METHOD_NODE_KF_DFPC,
     METHOD_NO_ALG,
     METHOD_RANDOM_REFERENCE,
 )
@@ -33,6 +35,7 @@ from .io_utils import write_rows
 
 PERFORMANCE_METHODS = [
     (METHOD_DFPC, "dfpc"),
+    (METHOD_NODE_KF_DFPC, "node_kf_dfpc"),
     (METHOD_KF_DFPC, "kf_dfpc"),
     (METHOD_CLUSTER_DFPC, "cluster_dfpc"),
     (METHOD_CLUSTER_KF_DFPC, "cluster_kf_dfpc"),
@@ -49,6 +52,25 @@ def parse_int_list(text: str) -> list[int]:
     return [int(x.strip()) for x in text.split(",") if x.strip()]
 
 
+def controlled_node_settings(
+    node_count: int,
+    target_mean_degree: float,
+    target_cluster_size: int,
+) -> dict[str, int | float]:
+    """Keep expected graph degree and cluster size stable while N changes."""
+    n = int(node_count)
+    if n < 4:
+        raise ValueError("controlled node-count sweeps require at least 4 nodes")
+    cluster_size = max(int(target_cluster_size), 1)
+    random_edge_probability = float(
+        np.clip((float(target_mean_degree) - 2.0) / (n - 3.0), 0.0, 1.0)
+    )
+    return {
+        "global_connectivity": random_edge_probability,
+        "n_clusters": max(1, int(ceil(n / cluster_size))),
+    }
+
+
 def summarize_result(res: dict[str, Any], factor: str, value: float, label: str) -> dict[str, Any]:
     """把一次 sweep 点的完整结果压缩成一行 summary。
 
@@ -60,6 +82,8 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
     dfpc_tail_gain = float(np.mean(metrics[METHOD_DFPC]["gain_linear"][tail]))
     no_alg_tail_gain = float(np.mean(metrics[METHOD_NO_ALG]["gain_linear"][tail]))
     dfpc_tail_power = float(np.mean(metrics[METHOD_DFPC]["power_linear"][tail]))
+    node_kf_tail_gain = float(np.mean(metrics[METHOD_NODE_KF_DFPC]["gain_linear"][tail]))
+    node_kf_tail_power = float(np.mean(metrics[METHOD_NODE_KF_DFPC]["power_linear"][tail]))
     kf_tail_gain = float(np.mean(metrics[METHOD_KF_DFPC]["gain_linear"][tail]))
     kf_tail_power = float(np.mean(metrics[METHOD_KF_DFPC]["power_linear"][tail]))
     no_alg_tail_power = float(np.mean(metrics[METHOD_NO_ALG]["power_linear"][tail]))
@@ -67,6 +91,11 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
     reference_tail_power = float(np.mean(metrics[METHOD_RANDOM_REFERENCE]["power_linear"][tail]))
     single_mean_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_mean_power_linear"][tail]))
     single_best_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_best_power_linear"][tail]))
+    effective_peers = res["cluster_diagnostics"]["effective_peer_count_mean"][tail]
+    effective_peer_mean = 0.0 if np.all(np.isnan(effective_peers)) else float(np.nanmean(effective_peers))
+    peer_coverage = float(
+        np.mean(res["cluster_diagnostics"]["nodes_with_subgraph_peers"][tail]) / res["args"]["N"]
+    )
     row = {
         "factor": factor,
         "factor_value": value,
@@ -75,6 +104,11 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "wavelength_m": float(res["wavelength_m"]),
         "N": int(res["args"]["N"]),
         "connectivity": float(res["args"]["global_connectivity"]),
+        "n_clusters": int(res["args"]["n_clusters"]),
+        "actual_mean_degree": float(res["graph_diagnostics"]["mean_degree"]),
+        "actual_mean_cluster_size": float(res["graph_diagnostics"]["mean_cluster_size"]),
+        "cluster_effective_peer_count_mean": effective_peer_mean,
+        "cluster_peer_coverage_fraction": peer_coverage,
         "uav_position_noise_m": float(res["args"]["uav_obs_noise"]),
         "node_position_noise_m": float(res["args"]["buoy_center_obs_noise"]),
         "mc_trials": int(res["mc_trials"]),
@@ -107,6 +141,32 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "dfpc_final_phase_std_deg": float(metrics[METHOD_DFPC]["phase_std_deg"][-1]),
         "dfpc_final_phase_rmse_deg": float(metrics[METHOD_DFPC]["phase_rmse_deg"][-1]),
         "dfpc_final_distance_rmse_m": float(metrics[METHOD_DFPC]["distance_rmse"][-1]),
+        "node_kf_dfpc_tail_power_db": float(10.0 * np.log10(max(node_kf_tail_gain, 1e-30))),
+        "node_kf_dfpc_gain_over_single_mean_db": float(
+            10.0 * np.log10(max(node_kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))
+        ),
+        "node_kf_dfpc_tail_phase_std_deg": float(
+            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["phase_std_deg"][tail])
+        ),
+        "node_kf_dfpc_tail_phase_rmse_deg": float(
+            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["phase_rmse_deg"][tail])
+        ),
+        "node_kf_dfpc_tail_distance_rmse_m": float(
+            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["distance_rmse"][tail])
+        ),
+        "node_kf_dfpc_tail_node_rmse_m": float(
+            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["node_rmse"][tail])
+        ),
+        "node_kf_dfpc_tail_uav_rmse_m": float(
+            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["uav_rmse"][tail])
+        ),
+        "node_kf_dfpc_final_power_db": float(metrics[METHOD_NODE_KF_DFPC]["norm_db"][-1]),
+        "node_kf_dfpc_final_phase_std_deg": float(
+            metrics[METHOD_NODE_KF_DFPC]["phase_std_deg"][-1]
+        ),
+        "node_kf_dfpc_final_distance_rmse_m": float(
+            metrics[METHOD_NODE_KF_DFPC]["distance_rmse"][-1]
+        ),
         "kf_dfpc_tail_power_db": float(10.0 * np.log10(max(kf_tail_gain, 1e-30))),
         "kf_improvement_over_dfpc_db": float(10.0 * np.log10(max(kf_tail_gain / max(dfpc_tail_gain, 1e-30), 1e-30))),
         "kf_dfpc_gain_over_single_mean_db": float(10.0 * np.log10(max(kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))),
@@ -120,7 +180,7 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "kf_dfpc_final_phase_rmse_deg": float(metrics[METHOD_KF_DFPC]["phase_rmse_deg"][-1]),
         "kf_dfpc_final_distance_rmse_m": float(metrics[METHOD_KF_DFPC]["distance_rmse"][-1]),
     }
-    for method, prefix in PERFORMANCE_METHODS[2:]:
+    for method, prefix in PERFORMANCE_METHODS[3:]:
         method_tail_gain = float(np.mean(metrics[method]["gain_linear"][tail]))
         method_tail_power = float(np.mean(metrics[method]["power_linear"][tail]))
         row.update(
@@ -266,6 +326,9 @@ def run_factor(
     values: str,
     out_dir: Path,
     rebound_threshold_db: float = 0.5,
+    controlled_design: bool = False,
+    target_mean_degree: float = 8.0,
+    target_cluster_size: int = 10,
 ) -> list[dict[str, Any]]:
     """运行一个因素的完整 sweep。"""
     rows = []
@@ -276,12 +339,33 @@ def run_factor(
     for idx, (value, label, overrides) in enumerate(sweep_points(factor, values)):
         point_dir = out_dir / factor / f"point_{idx:02d}"
         point_cfg = replace(cfg, out_dir=str(point_dir))
+        if controlled_design and factor == "node_count":
+            overrides.update(
+                controlled_node_settings(
+                    int(value),
+                    target_mean_degree,
+                    target_cluster_size,
+                )
+            )
+        elif controlled_design and factor == "connectivity":
+            overrides["n_clusters"] = max(
+                1,
+                int(ceil(point_cfg.N / max(int(target_cluster_size), 1))),
+            )
         for key, val in overrides.items():
             setattr(point_cfg, key, val)
         print(f"[{factor}] {idx + 1} {label}", flush=True)
         res = run_experiment(point_cfg)
         summary = summarize_result(res, factor, value, label)
-        summary.update({"point_index": idx, "point_out_dir": str(point_dir)})
+        summary.update(
+            {
+                "controlled_design": bool(controlled_design),
+                "target_mean_degree": target_mean_degree if factor == "node_count" else "",
+                "target_cluster_size": target_cluster_size if controlled_design else "",
+                "point_index": idx,
+                "point_out_dir": str(point_dir),
+            }
+        )
         rows.append(summary)
         common = {
             "factor": factor,
@@ -504,6 +588,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_power_db",
+                "node_kf_dfpc_tail_power_db",
                 "kf_dfpc_tail_power_db",
                 "cluster_dfpc_tail_power_db",
                 "cluster_kf_dfpc_tail_power_db",
@@ -514,6 +599,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_phase_std_deg",
+                "node_kf_dfpc_tail_phase_std_deg",
                 "kf_dfpc_phase_std_deg",
                 "cluster_dfpc_tail_phase_std_deg",
                 "cluster_kf_dfpc_tail_phase_std_deg",
@@ -524,6 +610,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_node_rmse_m",
+                "node_kf_dfpc_tail_node_rmse_m",
                 "kf_dfpc_node_rmse_m",
                 "cluster_dfpc_tail_node_rmse_m",
                 "cluster_kf_dfpc_tail_node_rmse_m",
@@ -626,7 +713,7 @@ def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> 
         return
     connectivities = sorted({float(row["factor_value"]) for row in rows})
     selected = {connectivities[0], connectivities[len(connectivities) // 2], connectivities[-1]}
-    figure, axes = plt.subplots(2, 2, figsize=(13.0, 8.4), sharex=True)
+    figure, axes = plt.subplots(3, 2, figsize=(13.0, 11.0), sharex=True)
     for axis, (method, _) in zip(axes.flat, PERFORMANCE_METHODS):
         for connectivity in sorted(selected):
             curve = sorted(
@@ -648,6 +735,8 @@ def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> 
         axis.set_ylabel("normalized power (dB)")
         axis.grid(True, alpha=0.3)
         axis.legend()
+    for axis in axes.flat[len(PERFORMANCE_METHODS) :]:
+        axis.set_visible(False)
     axes[-1, 0].set_xlabel("physical time (s)")
     axes[-1, 1].set_xlabel("physical time (s)")
     figure.tight_layout()
