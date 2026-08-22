@@ -16,6 +16,16 @@ from dfpc_experiment.sweeps import (
 
 
 class SweepTests(unittest.TestCase):
+    def test_convergence_summary_is_not_limited_by_block_length(self) -> None:
+        power_db = np.array([-3.0, -2.0, -1.0] + [0.0] * 17)
+        result = {
+            "metrics": {"method": {"gain_linear": 10.0 ** (power_db / 10.0)}},
+            "args": {"K": 10, "Ts": 0.1},
+        }
+        summary = convergence_summary(result, "method")
+        self.assertLess(summary["convergence_time_s_05db"], 0.9)
+        self.assertLess(summary["settling_time_s_01db_w5"], 0.9)
+
     def test_controlled_node_settings_hold_degree_and_cluster_size(self) -> None:
         for node_count in [20, 100, 2000]:
             settings = controlled_node_settings(node_count, 8.0, 10)

@@ -225,18 +225,23 @@ def convergence_summary(
     """Measure sustained convergence to a method's own steady-state band."""
     gain = np.asarray(res["metrics"][method]["gain_linear"], dtype=np.float64)
     total = gain.size
-    window = max(1, min(int(res["args"]["K"]), total))
+    block_window = max(1, min(int(res["args"]["K"]), total))
+    settling_window = max(1, min(5, total))
     tail = slice(int(0.8 * total), None)
     tail_db = float(10.0 * np.log10(max(float(np.mean(gain[tail])), 1e-30)))
-    rolling = np.convolve(gain, np.ones(window) / window, mode="valid")
+    rolling = np.convolve(gain, np.ones(settling_window) / settling_window, mode="valid")
     rolling_db = 10.0 * np.log10(np.maximum(rolling, 1e-30))
-    threshold = tail_db - float(tolerance_db)
-    hold = max(2, min(window // 2, rolling_db.size))
-    convergence_step = total
-    for index in range(rolling_db.size - hold + 1):
-        if np.all(rolling_db[index : index + hold] >= threshold):
-            convergence_step = index + window - 1
-            break
+    hold = max(1, min(5, rolling_db.size))
+
+    def sustained_step(tolerance: float) -> int:
+        threshold = tail_db - tolerance
+        for index in range(rolling_db.size - hold + 1):
+            if np.all(rolling_db[index : index + hold] >= threshold):
+                return index + settling_window - 1
+        return total
+
+    convergence_step = sustained_step(float(tolerance_db))
+    strict_step = sustained_step(0.1)
     norm_db = 10.0 * np.log10(np.maximum(gain, 1e-30))
     transient_end = max(1, total // 2)
     transient_deficit = np.maximum(tail_db - norm_db[:transient_end], 0.0)
@@ -244,9 +249,11 @@ def convergence_summary(
         "tail_power_db": tail_db,
         "convergence_step_05db": convergence_step,
         "convergence_time_s_05db": convergence_step * float(res["args"]["Ts"]),
+        "settling_step_01db_w5": strict_step,
+        "settling_time_s_01db_w5": strict_step * float(res["args"]["Ts"]),
         "transient_deficit_mean_db": float(np.mean(transient_deficit)),
         "first_block_power_db": float(
-            10.0 * np.log10(max(float(np.mean(gain[:window])), 1e-30))
+            10.0 * np.log10(max(float(np.mean(gain[:block_window])), 1e-30))
         ),
     }
 
