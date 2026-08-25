@@ -102,7 +102,7 @@ class Kalman3DTests(unittest.TestCase):
         dpc_initial_velocity_rmse = result["metrics"][METHOD_DFPC]["uav_velocity_rmse"][0]
         self.assertLess(metrics["uav_velocity_rmse"][-1], dpc_initial_velocity_rmse)
 
-    def test_uav_kf_waits_for_a_complete_trajectory_window(self) -> None:
+    def test_uav_kf_initializes_once_then_consumes_each_new_observation(self) -> None:
         cfg = ExperimentConfig(
             N=24,
             T_long=3,
@@ -112,8 +112,10 @@ class Kalman3DTests(unittest.TestCase):
             Ts=0.2,
         )
         result = run_experiment(cfg)
-        expected_updates = cfg.T_long * cfg.K - cfg.K + 1
-        self.assertEqual(result["uav_kf_window_updates"], expected_updates)
+        total_steps = cfg.T_long * cfg.K
+        self.assertEqual(result["uav_kf_window_updates"], 1)
+        self.assertEqual(result["uav_kf_trajectory_initializations"], 1)
+        self.assertEqual(result["uav_kf_position_updates"], total_steps - cfg.K)
         self.assertEqual(result["uav_kf_window_size"], cfg.K)
         np.testing.assert_allclose(
             result["metrics"][METHOD_KF_DFPC]["uav_rmse"][: cfg.K - 1],

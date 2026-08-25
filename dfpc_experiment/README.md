@@ -9,7 +9,7 @@ migrated into `sim_core.py`.
 - `config.py`: all experiment parameters and CLI options.
 - `scenario.py`: node/UAV deployment, motion model, and observation model.
 - `trajectory.py`: each buoy independently estimates a 3-D UAV line and its OLS uncertainty; DPC reaches consensus on the line and predicts the full current `[position, velocity]` state.
-- `kalman.py`: batched 3-D constant-velocity Kalman filters; after warm-up, the UAV filter updates every `Ts` from a complete rolling trajectory window and its per-node covariance.
+- `kalman.py`: batched 3-D constant-velocity Kalman filters; one complete trajectory initializes the UAV filter, then each new position observation is consumed exactly once.
 - `metrics.py`: DPC power, phase error, RMSE, and single-node gain metrics.
 - `experiment.py`: single-trial and Monte Carlo experiment loops.
 - `plots.py`: CSV, NPZ, PNG, and Markdown outputs.
@@ -32,9 +32,10 @@ python uav_dfpc_modular_project/dfpc_experiment/run_experiment.py --mc_trials 20
 ```
 
 The experiment retains only the linear 3-D constant-velocity Kalman filter.
-The UAV filter consumes a rolling window of the latest `K` observations.  It
-waits for one complete window, then updates every `Ts`; long-block boundaries
-do not reset the trajectory estimator.
+The UAV filter waits for the first `K` observations and is initialized once
+from their fitted trajectory.  Its posterior then owns all historical
+information, and each later `Ts` update consumes only the newly arrived
+position observation; neither long-block boundaries nor rolling OLS reset it.
 Outputs compare the no-algorithm baseline, ordinary DPC, clustered DPC,
 UAV+node Kalman DPC, and its clustered position-correction variant.
 
