@@ -84,3 +84,9 @@ python uav_dfpc_modular_project\dfpc_experiment\run_sweeps.py `
 - `frequency_rebound_debug_report.md`：回升事件的人可读索引。
 
 输出默认保存在 `uav_dfpc_modular_project/modular_dfpc_outputs` 下，也可以用 `--out_dir` 指定新位置。
+
+## 已归档实验结果
+
+当前分支已经完成的节点数、连通度、频率、联合网格和版本对比实验，统一整理在
+[`实验结果`](实验结果/README.md) 目录。该目录保留论文分析所需的标准化数据表、关键图和报告，
+并说明各类实验的功率、相位与定位误差口径。
