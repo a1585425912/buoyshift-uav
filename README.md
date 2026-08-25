@@ -30,7 +30,8 @@ python uav_dfpc_modular_project\dfpc_experiment\run_experiment.py --device cpu
 但 KF 状态已保留 `z` 和 `vz`，以后可以直接接入高度变化。
 普通 DPC 仍使用最近 `K` 份观测的滚动共识轨迹计算相位。KF-DPC 只用最初
 `K` 份观测拟合的位置、速度和 OLS 协方差初始化一次 UAV KF；此后历史信息
-保存在持续递归的 KF 后验中，每个 `Ts` 只融合当前新增的位置观测一次。
+保存在持续递归的 KF 后验中。每个 `Ts` 先分别对预测状态和当前新增的位置观测
+执行一次邻域共识，再按共识观测的有效协方差更新 KF；每份原始观测只进入一次。
 
 运行一个较小的调试实验：
 

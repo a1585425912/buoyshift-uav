@@ -12,6 +12,22 @@ from dfpc_experiment.scenario import current_truth, init_scene, observe_position
 
 
 class Kalman3DTests(unittest.TestCase):
+    def test_position_update_accepts_per_node_measurement_covariance(self) -> None:
+        kf = make_cv3d_filter(
+            np.zeros((2, 3)),
+            dt=0.1,
+            measurement_std=1.0,
+            acceleration_std=0.0,
+            initial_velocity_std=1.0,
+        )
+        measurements = np.full((2, 3), 10.0)
+        covariance = np.stack([np.eye(3), 100.0 * np.eye(3)])
+
+        kf.update_position_covariance(measurements, covariance)
+
+        self.assertGreater(kf.positions[0, 0], kf.positions[1, 0])
+        self.assertTrue(np.all(np.isfinite(kf.P)))
+
     def test_consensus_covariance_is_conservative_for_unknown_correlation(self) -> None:
         W = np.array([[0.5, 0.5], [0.5, 0.5]], dtype=float)
         P = np.array(
@@ -118,8 +134,8 @@ class Kalman3DTests(unittest.TestCase):
         self.assertEqual(result["uav_kf_position_updates"], total_steps - cfg.K)
         self.assertEqual(result["uav_kf_window_size"], cfg.K)
         np.testing.assert_allclose(
-            result["metrics"][METHOD_KF_DFPC]["uav_rmse"][: cfg.K - 1],
-            result["metrics"][METHOD_DFPC]["uav_rmse"][: cfg.K - 1],
+            result["metrics"][METHOD_KF_DFPC]["uav_rmse"][: cfg.K],
+            result["metrics"][METHOD_DFPC]["uav_rmse"][: cfg.K],
             atol=1e-12,
         )
         self.assertLess(

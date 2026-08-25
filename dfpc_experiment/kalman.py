@@ -90,6 +90,17 @@ class BatchCVKalman3D:
         r = max(float(measurement_std), 1e-9) ** 2
         self._update_linear_measurement(z, self.H, r * np.eye(3))
 
+    def update_position_covariance(
+        self,
+        positions_xyz: np.ndarray,
+        measurement_covariances: np.ndarray,
+    ) -> None:
+        """Update positions using a shared or per-node 3-D covariance."""
+        z = np.asarray(positions_xyz, dtype=np.float64)
+        if z.shape != (self.x.shape[0], 3):
+            raise ValueError(f"positions must have shape {(self.x.shape[0], 3)}, got {z.shape}")
+        self._update_linear_measurement(z, self.H, measurement_covariances)
+
     def update_trajectory_measurement(
         self,
         trajectory_states: np.ndarray,

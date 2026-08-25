@@ -99,12 +99,10 @@ def initialize_uav_filter(
     trajectory: TrajectoryPrediction,
     cfg: ExperimentConfig,
     update_interval_s: float,
-    weight_matrix: np.ndarray,
-    weight_matrix_gpu: object,
     extra_trajectory_state: np.ndarray | None = None,
     extra_trajectory_covariance: np.ndarray | None = None,
 ) -> BatchCVKalman3D:
-    """Initialize one persistent UAV KF from the first complete trajectory."""
+    """Initialize one persistent UAV KF from an already-consensused trajectory."""
     kf = make_cv3d_filter(
         trajectory.positions,
         update_interval_s,
@@ -124,13 +122,6 @@ def initialize_uav_filter(
             extra_trajectory_covariance,
         )
 
-    kf.x = backend.consensus_linear_accel(
-        weight_matrix,
-        weight_matrix_gpu,
-        kf.x,
-        1,
-    ).copy()
-    kf.P = consensus_covariance(weight_matrix, kf.P)
     return kf
 
 
@@ -139,10 +130,10 @@ def update_uav_filter(
     position_observation: np.ndarray,
     weight_matrix: np.ndarray,
     weight_matrix_gpu: object,
+    measurement_std: float,
 ) -> None:
-    """Advance the persistent KF and consume exactly one new position sample."""
+    """Advance the persistent KF using one consensused position sample."""
     kf.predict()
-    kf.update(position_observation)
     kf.x = backend.consensus_linear_accel(
         weight_matrix,
         weight_matrix_gpu,
@@ -150,6 +141,19 @@ def update_uav_filter(
         1,
     ).copy()
     kf.P = consensus_covariance(weight_matrix, kf.P)
+
+    consensus_observation = backend.consensus_linear_accel(
+        weight_matrix,
+        weight_matrix_gpu,
+        position_observation,
+        1,
+    )
+    observation_variance = (
+        max(float(measurement_std), 1e-9) ** 2
+        * np.sum(np.asarray(weight_matrix, dtype=np.float64) ** 2, axis=1)
+    )
+    observation_covariance = observation_variance[:, None, None] * np.eye(3)[None, :, :]
+    kf.update_position_covariance(consensus_observation, observation_covariance)
 
 
 def run_single_trial(
@@ -367,8 +371,6 @@ def run_single_trial(
                     uav_trajectory_dfpc,
                     cfg,
                     cfg.Ts,
-                    state.W_global,
-                    state.W_global_gpu,
                     standard_extra_state,
                     standard_extra_covariance,
                 )
@@ -377,8 +379,6 @@ def run_single_trial(
                         uav_trajectory_dfpc,
                         cfg,
                         cfg.Ts,
-                        state.W_global,
-                        state.W_global_gpu,
                         cluster_uav_prior_state,
                         cluster_uav_prior_covariance,
                     )
@@ -389,6 +389,7 @@ def run_single_trial(
                     uav_obs_short,
                     state.W_global,
                     state.W_global_gpu,
+                    cfg.uav_obs_noise,
                 )
                 if uav_kf_cluster is not None:
                     update_uav_filter(
@@ -396,6 +397,7 @@ def run_single_trial(
                         uav_obs_short,
                         state.W_global,
                         state.W_global_gpu,
+                        cfg.uav_obs_noise,
                     )
                 uav_kf_position_updates += 1
 
