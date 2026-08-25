@@ -64,6 +64,23 @@ class Kalman3DTests(unittest.TestCase):
         np.testing.assert_allclose(kf.positions, expected, atol=1e-12)
         np.testing.assert_allclose(kf.P, np.swapaxes(kf.P, 1, 2), atol=1e-12)
 
+    def test_full_trajectory_measurement_updates_velocity_directly(self) -> None:
+        n = 2
+        trajectory = np.tile([5.0, -2.0, 120.0, 4.0, -1.0, 0.25], (n, 1))
+        kf = make_cv3d_filter(
+            trajectory[:, :3],
+            dt=0.5,
+            measurement_std=1.0,
+            acceleration_std=0.0,
+            initial_velocity_std=10.0,
+        )
+        covariance = np.broadcast_to(0.01 * np.eye(6), (n, 6, 6)).copy()
+        kf.update_trajectory_measurement(trajectory, covariance)
+
+        np.testing.assert_allclose(kf.positions, trajectory[:, :3], atol=1e-12)
+        np.testing.assert_allclose(kf.velocities, trajectory[:, 3:], atol=1e-3)
+        np.testing.assert_allclose(kf.P, np.swapaxes(kf.P, 1, 2), atol=1e-12)
+
     def test_scene_observations_and_truth_are_three_dimensional(self) -> None:
         cfg = ExperimentConfig(N=8, device="cpu")
         scene_rng = np.random.default_rng(1)

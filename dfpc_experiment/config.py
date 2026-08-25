@@ -51,8 +51,8 @@ class ExperimentConfig:
     # buoy_short_*: 浮标相对慢变中心的小尺度有界扰动参数。
     # system_phase_std_deg: 额外系统相位误差，例如同步误差。
     uav_obs_noise: float = 3.0
-    # DPC consensus is a much lower-variance UAV position pseudo-measurement
-    # than one node's raw observation.
+    # Additive position-model uncertainty for the full DPC trajectory
+    # pseudo-measurement; OLS supplies the remaining position/velocity covariance.
     uav_dpc_prior_noise_std: float = 0.3
     buoy_short_radius: float = 1.0
     buoy_short_diffusion: float = 0.08

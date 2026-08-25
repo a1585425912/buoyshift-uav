@@ -9,9 +9,11 @@ from dfpc_experiment.constants import METHOD_DPC
 from dfpc_experiment.experiment import run_experiment
 from dfpc_experiment.scenario import advance_truth_one_long_block, advance_truth_one_short_step, init_scene
 from dfpc_experiment.trajectory import (
+    consensus_independent_covariance,
     init_line_estimator,
     normalize_trajectory_directions,
     predict_positions,
+    predict_trajectory,
     trajectory_directions,
     trajectory_state_from_position_velocity,
     trajectory_velocities,
@@ -80,6 +82,39 @@ class TrajectoryEstimatorTests(unittest.TestCase):
         normalized = normalize_trajectory_directions(states)
         np.testing.assert_allclose(np.linalg.norm(normalized[:, 6:], axis=1), 1.0)
         np.testing.assert_allclose(normalized[1, 6:], [0.0, 1.0, 0.0])
+
+    def test_trajectory_prediction_contains_velocity_and_covariance(self) -> None:
+        n = 3
+        estimator = init_line_estimator(n)
+        params = None
+        for time_s in [0.0, 1.0, 2.0]:
+            xyz = np.tile([2.0 + 3.0 * time_s, -1.0 + time_s, 120.0], (n, 1))
+            params = update_local_line_estimates(estimator, time_s, xyz)
+        assert params is not None
+
+        prediction = predict_trajectory(
+            params,
+            estimator,
+            time_s=3.0,
+            measurement_std=2.0,
+            initial_velocity_std=10.0,
+        )
+        np.testing.assert_allclose(
+            prediction.state,
+            np.tile([11.0, 2.0, 120.0, 3.0, 1.0, 0.0], (n, 1)),
+            atol=1e-12,
+        )
+        self.assertEqual(prediction.covariance.shape, (n, 6, 6))
+        np.testing.assert_allclose(
+            prediction.covariance,
+            np.swapaxes(prediction.covariance, 1, 2),
+            atol=1e-12,
+        )
+        self.assertLess(prediction.covariance[0, 3, 3], 10.0**2)
+
+        W = np.full((n, n), 1.0 / n)
+        mixed = consensus_independent_covariance(W, prediction.covariance)
+        np.testing.assert_allclose(mixed, prediction.covariance / n, atol=1e-12)
 
     def test_trajectory_state_from_position_velocity(self) -> None:
         position = np.tile([10.0, 20.0, 120.0], (3, 1))

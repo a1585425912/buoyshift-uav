@@ -34,6 +34,22 @@ class LineEstimatorState:
     sum_txyz: np.ndarray
 
 
+@dataclass(frozen=True)
+class TrajectoryPrediction:
+    """Current UAV position/velocity prediction and its uncertainty."""
+
+    state: np.ndarray
+    covariance: np.ndarray
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self.state[:, :3]
+
+    @property
+    def velocities(self) -> np.ndarray:
+        return self.state[:, 3:]
+
+
 def init_line_estimator(n: int) -> LineEstimatorState:
     return LineEstimatorState(
         count=0,
@@ -118,6 +134,88 @@ def trajectory_directions(trajectory_states: np.ndarray) -> np.ndarray:
     """Return consensus unit flight directions ``[dx, dy, dz]``."""
     states = np.asarray(trajectory_states, dtype=np.float64)
     return states[:, DIRECTION_COLUMNS]
+
+
+def trajectory_state_at_time(trajectory_states: np.ndarray, time_s: float) -> np.ndarray:
+    """Convert line parameters to the current state [px,py,pz,vx,vy,vz]."""
+    states = np.asarray(trajectory_states, dtype=np.float64)
+    if states.ndim != 2 or states.shape[1] != 9:
+        raise ValueError("trajectory_states must have shape (N, 9)")
+    position = predict_positions(states, time_s)
+    velocity = trajectory_velocities(states)
+    return np.column_stack([position, velocity])
+
+
+def trajectory_prediction_covariance(
+    estimator_state: LineEstimatorState,
+    time_s: float,
+    measurement_std: float,
+    initial_velocity_std: float,
+) -> np.ndarray:
+    """Return OLS covariance for [position, velocity] at time_s.
+
+    The three coordinate axes use the same observation times and independent
+    isotropic measurement noise.  Before velocity becomes observable, retain
+    the configured initial velocity uncertainty instead of fabricating a
+    zero-variance velocity measurement.
+    """
+    if estimator_state.count < 1:
+        raise ValueError("at least one trajectory observation is required")
+    sigma2 = max(float(measurement_std), 1e-9) ** 2
+    velocity_var = max(float(initial_velocity_std), 1e-9) ** 2
+    count = float(estimator_state.count)
+    determinant = count * estimator_state.sum_t2 - estimator_state.sum_t**2
+
+    if determinant <= 1e-12:
+        covariance_pv = np.diag([sigma2, velocity_var])
+    else:
+        covariance_bv = sigma2 / determinant * np.array(
+            [
+                [estimator_state.sum_t2, -estimator_state.sum_t],
+                [-estimator_state.sum_t, count],
+            ],
+            dtype=np.float64,
+        )
+        transform = np.array([[1.0, float(time_s)], [0.0, 1.0]], dtype=np.float64)
+        covariance_pv = transform @ covariance_bv @ transform.T
+
+    n = estimator_state.sum_xyz.shape[0]
+    covariance = np.zeros((n, 6, 6), dtype=np.float64)
+    for axis in range(3):
+        indices = np.array([axis, axis + 3])
+        covariance[:, indices[:, None], indices] = covariance_pv
+    return covariance
+
+
+def predict_trajectory(
+    trajectory_states: np.ndarray,
+    estimator_state: LineEstimatorState,
+    time_s: float,
+    measurement_std: float,
+    initial_velocity_std: float,
+) -> TrajectoryPrediction:
+    """Build a trajectory-aware UAV pseudo-measurement for Kalman fusion."""
+    return TrajectoryPrediction(
+        state=trajectory_state_at_time(trajectory_states, time_s),
+        covariance=trajectory_prediction_covariance(
+            estimator_state,
+            time_s,
+            measurement_std,
+            initial_velocity_std,
+        ),
+    )
+
+
+def consensus_independent_covariance(
+    weight_matrix: np.ndarray,
+    covariance: np.ndarray,
+) -> np.ndarray:
+    """Propagate independent local-estimate covariance through one consensus step."""
+    weights = np.asarray(weight_matrix, dtype=np.float64)
+    values = np.asarray(covariance, dtype=np.float64)
+    if weights.shape != (values.shape[0], values.shape[0]):
+        raise ValueError("weight_matrix and covariance must have matching node dimensions")
+    return np.einsum("ij,jkl->ikl", weights**2, values)
 
 
 def trajectory_state_from_position_velocity(

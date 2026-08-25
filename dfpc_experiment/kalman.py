@@ -34,18 +34,47 @@ class BatchCVKalman3D:
         z = np.asarray(measurements_xyz, dtype=np.float64)
         if z.shape != (self.x.shape[0], 3):
             raise ValueError(f"measurements must have shape {(self.x.shape[0], 3)}, got {z.shape}")
-        innovation = z - self.x @ self.H.T
-        innovation_cov = np.einsum("ij,njk,lk->nil", self.H, self.P, self.H) + self.R[None, :, :]
-        pht = np.einsum("nij,kj->nik", self.P, self.H)
+        self._update_linear_measurement(z, self.H, self.R)
+
+    def _update_linear_measurement(
+        self,
+        measurements: np.ndarray,
+        observation_matrix: np.ndarray,
+        measurement_covariance: np.ndarray,
+    ) -> None:
+        """Update from a shared linear observation model and per-node covariance."""
+        z = np.asarray(measurements, dtype=np.float64)
+        H = np.asarray(observation_matrix, dtype=np.float64)
+        if H.ndim != 2 or H.shape[1] != 6:
+            raise ValueError("observation_matrix must have shape (M, 6)")
+        expected_shape = (self.x.shape[0], H.shape[0])
+        if z.shape != expected_shape:
+            raise ValueError(f"measurements must have shape {expected_shape}, got {z.shape}")
+
+        covariance = np.asarray(measurement_covariance, dtype=np.float64)
+        if covariance.shape == (H.shape[0], H.shape[0]):
+            covariance = np.broadcast_to(
+                covariance,
+                (self.x.shape[0], H.shape[0], H.shape[0]),
+            )
+        elif covariance.shape != (self.x.shape[0], H.shape[0], H.shape[0]):
+            raise ValueError(
+                "measurement_covariance must be shared (M, M) or batched (N, M, M)"
+            )
+        covariance = 0.5 * (covariance + np.swapaxes(covariance, 1, 2))
+
+        innovation = z - self.x @ H.T
+        innovation_cov = np.einsum("ij,njk,lk->nil", H, self.P, H) + covariance
+        pht = np.einsum("nij,kj->nik", self.P, H)
         gain = np.einsum("nij,njk->nik", pht, np.linalg.inv(innovation_cov))
         self.x = self.x + np.einsum("nij,nj->ni", gain, innovation)
 
         # Joseph 形式能在长时间和高频 sweep 中更好地保持协方差对称半正定。
         identity = np.eye(6, dtype=np.float64)[None, :, :]
-        ikh = identity - np.einsum("nij,jk->nik", gain, self.H)
+        ikh = identity - np.einsum("nij,jk->nik", gain, H)
         left = np.einsum("nij,njk->nik", ikh, self.P)
         joseph = np.einsum("nij,nkj->nik", left, ikh)
-        kr = np.einsum("nij,jk->nik", gain, self.R)
+        kr = np.einsum("nij,njk->nik", gain, covariance)
         self.P = joseph + np.einsum("nij,nkj->nik", kr, gain)
         self.P = 0.5 * (self.P + np.swapaxes(self.P, 1, 2))
 
@@ -59,12 +88,18 @@ class BatchCVKalman3D:
         if z.shape != (self.x.shape[0], 3):
             raise ValueError(f"positions must have shape {(self.x.shape[0], 3)}, got {z.shape}")
         r = max(float(measurement_std), 1e-9) ** 2
-        saved_r = self.R
-        try:
-            self.R = r * np.eye(3)
-            self.update(z)
-        finally:
-            self.R = saved_r
+        self._update_linear_measurement(z, self.H, r * np.eye(3))
+
+    def update_trajectory_measurement(
+        self,
+        trajectory_states: np.ndarray,
+        measurement_covariances: np.ndarray,
+    ) -> None:
+        """Fuse full UAV trajectory states [px,py,pz,vx,vy,vz]."""
+        states = np.asarray(trajectory_states, dtype=np.float64)
+        if states.shape != self.x.shape:
+            raise ValueError(f"trajectory_states must have shape {self.x.shape}, got {states.shape}")
+        self._update_linear_measurement(states, np.eye(6), measurement_covariances)
 
 
 def make_cv3d_filter(

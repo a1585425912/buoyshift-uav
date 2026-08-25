@@ -3,8 +3,8 @@
 这个文件把各模块串起来：
 1. 初始化场景；
 2. 每个长块推进 K 个 Ts 短步并产生观测；
-3. 短时间尺度：block 内 K 次 iteration，每个 iteration 先做 DPC 共识得到 UAV 估计，
-   再把该估计作为观测喂给短时间尺度 KF（dt=Ts，状态 [x,y,z,vx,vy,vz]）更新位置；
+3. 短时间尺度：block 内 K 次 iteration，每个 iteration 先做 DPC 共识得到 UAV
+   轨迹 [位置,速度] 及协方差，再把完整轨迹作为六维观测喂给短时间尺度 KF；
 4. 长时间尺度：block 结束时，用短尺度 KF 收敛后的位置作为观测，更新长时间尺度 KF
    （dt=Ts，每个 block 推进 K 次，物理间隔 K*Ts），使速度在块间逐步收敛；
    短尺度 KF 在每块开始时同步长尺度后验的速度；
@@ -56,9 +56,13 @@ from .scenario import (
 from .trajectory import (
     INTERCEPT_COLUMNS,
     VELOCITY_COLUMNS,
+    TrajectoryPrediction,
+    consensus_independent_covariance,
     init_line_estimator,
     normalize_trajectory_directions,
     predict_positions,
+    predict_trajectory,
+    trajectory_state_at_time,
     trajectory_state_from_position_velocity,
     update_local_line_estimates,
 )
@@ -71,6 +75,29 @@ def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
     if weights.shape[0] != weights.shape[1] or weights.shape[0] != covariance.shape[0]:
         raise ValueError("W and P must have matching leading dimensions")
     return np.einsum("ij,jkl->ikl", weights, covariance)
+
+
+def dpc_trajectory_prediction(
+    line_params: np.ndarray,
+    local_prediction: TrajectoryPrediction,
+    weight_matrix: np.ndarray,
+    position_model_std: float,
+    velocity_model_std: float,
+    time_s: float,
+) -> TrajectoryPrediction:
+    """Build the full-state DPC pseudo-measurement after one consensus step."""
+    covariance = consensus_independent_covariance(
+        weight_matrix,
+        local_prediction.covariance,
+    )
+    position_model_var = max(float(position_model_std), 0.0) ** 2
+    covariance[:, :3, :3] += position_model_var * np.eye(3)[None, :, :]
+    velocity_model_var = max(float(velocity_model_std), 0.0) ** 2
+    covariance[:, 3:, 3:] += velocity_model_var * np.eye(3)[None, :, :]
+    return TrajectoryPrediction(
+        state=trajectory_state_at_time(line_params, time_s),
+        covariance=covariance,
+    )
 
 
 def run_single_trial(
@@ -171,6 +198,13 @@ def run_single_trial(
         uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
         # 每个节点用自身截至当前时刻的全部观测拟合 x=bx+vx*t, y=by+vy*t。
         line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
+        local_trajectory_prediction = predict_trajectory(
+            line_params_dfpc,
+            line_estimator,
+            time_s,
+            cfg.uav_obs_noise,
+            cfg.uav_kf_initial_velocity_std,
+        )
 
         # 双时间尺度 UAV KF：
         #   - 长时间尺度 uav_kf_long：状态 [x,y,z,vx,vy,vz]，dt=Ts，
@@ -260,10 +294,18 @@ def run_single_trial(
                 p_u_true, buoy_true_short = current_truth(state)
                 uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
                 line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
+                local_trajectory_prediction = predict_trajectory(
+                    line_params_dfpc,
+                    line_estimator,
+                    time_s,
+                    cfg.uav_obs_noise,
+                    cfg.uav_kf_initial_velocity_std,
+                )
 
             # 解除“block 内真值固定”：除 iteration 0 外，每个短步都推进一个 Ts 后重新观测。
             # ---- 1) 短时间尺度 DPC：对三维轨迹、三轴速度和单位航向做一次邻居共识。
-            cluster_uav_prior_est = None
+            cluster_uav_prior_state = None
+            cluster_uav_prior_covariance = None
             if cfg.enable_cluster and (
                 cfg.cluster_mode == "uav_prior"
                 or cfg.uav_kf_prior_mode == "dpc_plus_cluster"
@@ -279,10 +321,18 @@ def run_single_trial(
                 cluster_prior_line_params = normalize_trajectory_directions(
                     cluster_prior_line_params
                 )
-                cluster_uav_prior_est = predict_positions(
+                cluster_uav_prior_state = trajectory_state_at_time(
                     cluster_prior_line_params,
                     time_s,
-                    cfg.uav_height,
+                )
+                cluster_uav_prior_covariance = local_trajectory_prediction.covariance.copy()
+                cluster_uav_prior_covariance[:, :3, :3] += (
+                    max(float(cfg.cluster_uav_prior_noise_std), 0.0) ** 2
+                    * np.eye(3)[None, :, :]
+                )
+                cluster_uav_prior_covariance[:, 3:, 3:] += (
+                    max(float(cfg.cluster_trajectory_noise_std), 0.0) ** 2
+                    * np.eye(3)[None, :, :]
                 )
             line_params_dfpc = backend.consensus_linear_accel(
                 state.W_global,
@@ -291,10 +341,18 @@ def run_single_trial(
                 1,
             )
             line_params_dfpc = normalize_trajectory_directions(line_params_dfpc)
-            uav_est_dfpc = predict_positions(line_params_dfpc, time_s, cfg.uav_height)
+            uav_trajectory_dfpc = dpc_trajectory_prediction(
+                line_params_dfpc,
+                local_trajectory_prediction,
+                state.W_global,
+                cfg.uav_dpc_prior_noise_std,
+                cfg.uav_kf_accel_std * cfg.Ts,
+                time_s,
+            )
+            uav_est_dfpc = uav_trajectory_dfpc.positions
 
-            # ---- 2) 短时间尺度 UAV KF（DPC 作先验、原始短观测 z_u 作似然）：
-            #        predict（dt=Ts，速度积分进位置）→ 注入 DPC 估计作位置先验 →
+            # ---- 2) 短时间尺度 UAV KF（DPC 轨迹作先验、原始短观测 z_u 作似然）：
+            #        predict → 融合 DPC [位置,速度] 及协方差 →
             #        update 用一份新的原始短观测 z_u_short_kf → consensus。
             # The first short-time sample is already the filter's initial
             # state; predicting before it would map the t=0 measurement onto
@@ -304,31 +362,32 @@ def run_single_trial(
             # Legacy path overwrites KF state with DPC then updates raw
             # observations, which pulls the good DPC estimate back toward
             # single-node noise.  The dpc_only branch instead treats DPC as a
-            # normal position pseudo-measurement so the KF fuses it properly.
+            # full trajectory pseudo-measurement so the KF fuses it properly.
             if cfg.uav_kf_prior_mode == "none":
                 inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std)
             else:
-                uav_kf_short.update_position_measurement(
-                    uav_est_dfpc,
-                    cfg.uav_dpc_prior_noise_std,
+                uav_kf_short.update_trajectory_measurement(
+                    uav_trajectory_dfpc.state,
+                    uav_trajectory_dfpc.covariance,
                 )
                 if (
                     cfg.uav_kf_prior_mode == "dpc_plus_cluster"
-                    and cluster_uav_prior_est is not None
+                    and cluster_uav_prior_state is not None
                 ):
-                    uav_kf_short.update_position_measurement(
-                        cluster_uav_prior_est,
-                        cfg.cluster_uav_prior_noise_std,
+                    uav_kf_short.update_trajectory_measurement(
+                        cluster_uav_prior_state,
+                        cluster_uav_prior_covariance,
                     )
-            if cluster_uav_prior_est is not None and uav_kf_prior_short is not None:
+            if cluster_uav_prior_state is not None and uav_kf_prior_short is not None:
                 if sidx > 0:
                     uav_kf_prior_short.predict()
-                inject_position_state(
-                    uav_kf_prior_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std
+                uav_kf_prior_short.update_trajectory_measurement(
+                    uav_trajectory_dfpc.state,
+                    uav_trajectory_dfpc.covariance,
                 )
-                uav_kf_prior_short.update_position_measurement(
-                    cluster_uav_prior_est,
-                    cfg.cluster_uav_prior_noise_std,
+                uav_kf_prior_short.update_trajectory_measurement(
+                    cluster_uav_prior_state,
+                    cluster_uav_prior_covariance,
                 )
             z_u_short_kf = p_u_true + rng_obs.normal(0.0, cfg.uav_obs_noise, size=(cfg.N, 3))
             if sidx > 0:

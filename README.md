@@ -6,8 +6,8 @@
 
 - `dfpc_experiment/config.py`：实验参数和命令行接口，优先修改这里。
 - `dfpc_experiment/scenario.py`：UAV、节点位置和观测模型。
-- `dfpc_experiment/trajectory.py`：节点在线估计 UAV 匀速直线参数。
-- `dfpc_experiment/kalman.py`：UAV 与浮标的批量三维恒速 Kalman 滤波。
+- `dfpc_experiment/trajectory.py`：节点在线估计 UAV 匀速轨迹，并输出位置、速度及协方差。
+- `dfpc_experiment/kalman.py`：UAV 与浮标的批量三维恒速 Kalman 滤波；UAV KF 直接融合六维轨迹观测。
 - `dfpc_experiment/sim_core.py`：从旧仿真文件迁移来的基础数学函数。
 - `dfpc_experiment/experiment.py`：单次完整实验和 Monte Carlo 主循环。
 - `dfpc_experiment/sweeps.py`：敏感性分析实验。
@@ -28,6 +28,8 @@ python uav_dfpc_modular_project\dfpc_experiment\run_experiment.py --device cpu
 `TL` 仅为兼容旧命令行参数保留，不再参与实验主循环。
 所有 DPC 距离均由三维坐标计算；当前 UAV 高度固定为 120 m、浮标高度固定为 0 m，
 但 KF 状态已保留 `z` 和 `vz`，以后可以直接接入高度变化。
+普通 DPC 仍使用共识轨迹预测出的当前位置计算相位；KF-DPC 则同时使用共识轨迹的
+位置、速度和 OLS 协方差更新 UAV KF，不再把轨迹降维成固定噪声的位置伪观测。
 
 运行一个较小的调试实验：
 
