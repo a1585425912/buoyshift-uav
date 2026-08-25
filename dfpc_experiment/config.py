@@ -23,9 +23,8 @@ class ExperimentConfig:
     # -------------------------
     # N: 节点/浮标数量。
     # fc_mhz: 工作频率，频率越高，同样距离误差会造成更大的相位误差。
-    # T_long: 长时间尺度块数。
-    # K: 每个长时间尺度块内的轨迹参数共识迭代次数（不是物理时间步数）。
-    # K is the number of physical short-time steps in each long block.
+    # T_long: 轨迹观测窗口数。
+    # K: 每个窗口内的物理短步/观测数；窗口时长恒为 K*Ts。
     N: int = 1000
     fc_mhz: float = 20.0
     T_long: int = 20
@@ -67,8 +66,7 @@ class ExperimentConfig:
     # UAV/浮标状态统一为 [x,y,z,vx,vy,vz]；当前真实高度固定，但滤波仍处理 z。
     uav_kf_accel_std: float = 0.5
     uav_kf_initial_velocity_std: float = 20.0
-    # KF 初始速度用“真实 UAV 速度 + 高斯噪声”，对齐旧版双时间尺度中
-    # 以长时间尺度速度为初值的做法。噪声小（2 m/s）以避免从零学起的瞬态。
+    # 保留给历史独立实验脚本的速度初始化噪声；窗口级主流程不读取真实 UAV 速度。
     uav_kf_velocity_init_std: float = 2.0
     buoy_kf_accel_std: float = 1.0
     buoy_kf_initial_velocity_std: float = 2.0
@@ -263,7 +261,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 def parse_experiment_args() -> ExperimentConfig:
     """解析单次实验入口的命令行参数，返回统一配置对象。"""
-    parser = argparse.ArgumentParser(description="Modular dual-timescale DPC experiment")
+    parser = argparse.ArgumentParser(description="Modular windowed trajectory-KF DPC experiment")
     add_common_args(parser)
     ns = vars(parser.parse_args())
     ns["enable_cluster"] = not bool(ns.pop("disable_cluster", False))

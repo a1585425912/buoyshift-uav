@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one modular dual-timescale DPC experiment."""
+"""Run one modular windowed trajectory-KF DPC experiment."""
 
 from __future__ import annotations
 

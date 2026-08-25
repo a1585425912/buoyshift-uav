@@ -41,7 +41,7 @@ def plot_metric(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig
         plt.axvline(block * cfg.K, color="black", linewidth=0.4, alpha=0.12)
     plt.xlabel("Time step")
     plt.ylabel(ylabel)
-    plt.title(f"{cfg.fc_mhz:.0f} MHz dual-timescale DPC: {ylabel}")
+    plt.title(f"{cfg.fc_mhz:.0f} MHz windowed trajectory-KF DPC: {ylabel}")
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=9)
     plt.tight_layout()

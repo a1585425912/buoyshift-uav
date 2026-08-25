@@ -1,1 +1,1 @@
-"""Modular dual-timescale DPC experiment package."""
+"""Modular windowed trajectory-KF DPC experiment package."""

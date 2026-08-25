@@ -102,6 +102,24 @@ class Kalman3DTests(unittest.TestCase):
         dpc_initial_velocity_rmse = result["metrics"][METHOD_DFPC]["uav_velocity_rmse"][0]
         self.assertLess(metrics["uav_velocity_rmse"][-1], dpc_initial_velocity_rmse)
 
+    def test_uav_kf_waits_for_a_complete_trajectory_window(self) -> None:
+        cfg = ExperimentConfig(
+            N=24,
+            T_long=3,
+            K=4,
+            mc_trials=1,
+            device="cpu",
+            Ts=0.2,
+        )
+        result = run_experiment(cfg)
+        self.assertEqual(result["uav_kf_window_updates"], cfg.T_long)
+        self.assertEqual(result["uav_kf_window_size"], cfg.K)
+        np.testing.assert_allclose(
+            result["metrics"][METHOD_KF_DFPC]["uav_rmse"][: cfg.K - 1],
+            result["metrics"][METHOD_DFPC]["uav_rmse"][: cfg.K - 1],
+            atol=1e-12,
+        )
+
     def test_subgraph_mode_and_diagnostics_are_exposed_end_to_end(self) -> None:
         cfg = ExperimentConfig(
             N=40,

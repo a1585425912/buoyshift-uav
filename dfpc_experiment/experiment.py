@@ -3,11 +3,9 @@
 这个文件把各模块串起来：
 1. 初始化场景；
 2. 每个长块推进 K 个 Ts 短步并产生观测；
-3. 短时间尺度：block 内 K 次 iteration，每个 iteration 先做 DPC 共识得到 UAV
-   轨迹 [位置,速度] 及协方差，再把完整轨迹作为六维观测喂给短时间尺度 KF；
-4. 长时间尺度：block 结束时，用短尺度 KF 收敛后的位置作为观测，更新长时间尺度 KF
-   （dt=Ts，每个 block 推进 K 次，物理间隔 K*Ts），使速度在块间逐步收敛；
-   短尺度 KF 在每块开始时同步长尺度后验的速度；
+3. block 内 K 次观测构成一个轨迹窗口；窗口结束时才用完整 UAV
+   轨迹 [位置,速度] 及协方差更新一次窗口级 KF；
+4. 窗口内部不做 UAV-KF 更新，只从上一窗口后验按匀速模型外推；
 5. 多个 Monte Carlo trial 做平均。
 """
 
@@ -41,9 +39,7 @@ from .constants import (
 from .debug_tools import DebugRecorder
 from .kalman import (
     BatchCVKalman3D,
-    inject_position_state,
     make_cv3d_filter,
-    predict_n_steps,
 )
 from .metrics import evaluate_dfpc, mean_stack, random_phase_reference_metrics
 from .scenario import (
@@ -98,6 +94,66 @@ def dpc_trajectory_prediction(
         state=trajectory_state_at_time(line_params, time_s),
         covariance=covariance,
     )
+
+
+def extrapolate_window_filter(
+    kf: BatchCVKalman3D | None,
+    elapsed_s: float,
+    fallback: TrajectoryPrediction,
+) -> np.ndarray:
+    """Return a causal UAV state without mutating the window-level filter."""
+    if kf is None:
+        return fallback.state.copy()
+    elapsed = max(float(elapsed_s), 0.0)
+    position = kf.positions + elapsed * kf.velocities
+    return np.column_stack([position, kf.velocities])
+
+
+def update_window_filter(
+    kf: BatchCVKalman3D | None,
+    trajectory: TrajectoryPrediction,
+    cfg: ExperimentConfig,
+    block_duration_s: float,
+    weight_matrix: np.ndarray,
+    weight_matrix_gpu: object,
+    extra_trajectory_state: np.ndarray | None = None,
+    extra_trajectory_covariance: np.ndarray | None = None,
+) -> BatchCVKalman3D:
+    """Initialize or update one UAV KF after a complete observation window."""
+    if kf is None:
+        kf = make_cv3d_filter(
+            trajectory.positions,
+            block_duration_s,
+            cfg.uav_obs_noise,
+            cfg.uav_kf_accel_std,
+            cfg.uav_kf_initial_velocity_std,
+            initial_velocity_xyz=trajectory.velocities,
+        )
+        kf.x = trajectory.state.copy()
+        kf.P = trajectory.covariance.copy()
+    else:
+        kf.predict()
+        kf.update_trajectory_measurement(
+            trajectory.state,
+            trajectory.covariance,
+        )
+
+    if extra_trajectory_state is not None:
+        if extra_trajectory_covariance is None:
+            raise ValueError("extra trajectory covariance is required")
+        kf.update_trajectory_measurement(
+            extra_trajectory_state,
+            extra_trajectory_covariance,
+        )
+
+    kf.x = backend.consensus_linear_accel(
+        weight_matrix,
+        weight_matrix_gpu,
+        kf.x,
+        1,
+    ).copy()
+    kf.P = consensus_covariance(weight_matrix, kf.P)
+    return kf
 
 
 def run_single_trial(
@@ -161,10 +217,10 @@ def run_single_trial(
         ],
         dtype=np.float64,
     )
-    line_estimator = init_line_estimator(cfg.N)
-    uav_kf_long: BatchCVKalman3D | None = None
-    uav_kf_short: BatchCVKalman3D | None = None
-    uav_kf_prior_short: BatchCVKalman3D | None = None
+    uav_kf_window: BatchCVKalman3D | None = None
+    uav_kf_cluster_window: BatchCVKalman3D | None = None
+    uav_kf_window_time_s: float | None = None
+    uav_kf_window_updates = 0
     node_kf: BatchCVKalman3D | None = None
     node_kf_prior: BatchCVKalman3D | None = None
     cluster_localizer = (
@@ -172,9 +228,6 @@ def run_single_trial(
         if cfg.enable_cluster and cfg.cluster_mode in {"subgraph", "localization", "node_prior"}
         else None
     )
-    # UAV KF 的初始速度：用真实 UAV 速度 + 高斯噪声作为初值，对齐旧版双时间尺度
-    # 中“以长时间尺度速度作为短时间尺度 KF 初值”的做法；噪声小以避免从零起步的瞬态。
-    uav_kf_velocity_true_xyz = state.uav_velocity_true.copy()
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
@@ -187,16 +240,18 @@ def run_single_trial(
         metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
 
     for block in range(cfg.T_long):
+        # 每个长块是一个独立观测窗口；KF 只消费完整窗口的轨迹结果。
+        line_estimator = init_line_estimator(cfg.N)
         # The previous block ends at short step K-1. Advance once before the
         # next block so every recorded sample is exactly Ts apart and block
         # boundaries never duplicate the same physical instant.
         if block > 0:
             advance_truth_one_short_step(cfg, state, rng_scene, cfg.Ts)
-        # 长时间尺度块开始：读取真实位置、生成一次观测、初始化/重置本块所需的 KF。
+        # 观测窗口开始：读取真实位置并生成窗口内第一份观测。
         time_s = block * block_duration_s
         p_u_true, buoy_true_short = current_truth(state)
         uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
-        # 每个节点用自身截至当前时刻的全部观测拟合 x=bx+vx*t, y=by+vy*t。
+        # 每个节点只使用当前窗口内的观测拟合三维匀速轨迹。
         line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
         local_trajectory_prediction = predict_trajectory(
             line_params_dfpc,
@@ -205,58 +260,6 @@ def run_single_trial(
             cfg.uav_obs_noise,
             cfg.uav_kf_initial_velocity_std,
         )
-
-        # 双时间尺度 UAV KF：
-        #   - 长时间尺度 uav_kf_long：状态 [x,y,z,vx,vy,vz]，dt=Ts，
-        #     每个长块推进 K 次，维持块间速度；物理推进量仍为 K*Ts。
-        #     首次构造用“真实 UAV 速度 + 小噪声”作初值，避免从零起步的瞬态。
-        #   - 短时间尺度 uav_kf_short：dt=Ts，velocity_propagate=True（block 内 UAV 随每步 Ts 推进）。
-        #     每块开始时从 long KF 的共识后验（状态+协方差）重置。
-        if uav_kf_long is None:
-            uav_kf_long = make_cv3d_filter(
-                uav_obs_short,
-                cfg.Ts,
-                cfg.uav_obs_noise,
-                cfg.uav_kf_accel_std,
-                cfg.uav_kf_initial_velocity_std,
-                initial_velocity_xyz=uav_kf_velocity_true_xyz
-                + rng_obs.normal(0.0, cfg.uav_kf_velocity_init_std, size=3),
-            )
-            uav_kf_short = make_cv3d_filter(
-                uav_obs_short,
-                cfg.Ts,
-                cfg.uav_obs_noise,
-                cfg.uav_kf_accel_std,
-                cfg.uav_kf_initial_velocity_std,
-                initial_velocity_xyz=uav_kf_velocity_true_xyz
-                + rng_obs.normal(0.0, cfg.uav_kf_velocity_init_std, size=3),
-                velocity_propagate=True,
-            )
-            if cfg.enable_cluster and cfg.cluster_mode == "uav_prior":
-                uav_kf_prior_short = make_cv3d_filter(
-                    uav_obs_short,
-                    cfg.Ts,
-                    cfg.uav_obs_noise,
-                    cfg.uav_kf_accel_std,
-                    cfg.uav_kf_initial_velocity_std,
-                    initial_velocity_xyz=uav_kf_velocity_true_xyz
-                    + rng_obs.normal(0.0, cfg.uav_kf_velocity_init_std, size=3),
-                    velocity_propagate=True,
-                )
-        else:
-            # Propagate the long-timescale filter over exactly the K short
-            # physical steps that elapsed since its previous update.  The
-            # truth advances K*Ts per block, not TL, so a block-sized predict
-            # with dt=K*Ts also fits the physical time axis.
-            predict_n_steps(uav_kf_long, cfg.K)
-        # 短时间尺度 UAV KF 从长尺度后验同步速度均值。
-        # The short-timescale KF remains continuous across block boundaries,
-        # so its position/velocity covariance is not reset here; overwriting
-        # the covariance with the long-timescale P kept the velocity estimate
-        # pinned near its initialization uncertainty.
-        uav_kf_short.x[:, 3:] = uav_kf_long.x[:, 3:].copy()
-        if uav_kf_prior_short is not None:
-            uav_kf_prior_short.x[:, 3:] = uav_kf_long.x[:, 3:].copy()
 
         # 节点（浮标）短时间尺度 KF：dt=Ts，velocity_propagate=True（浮标随 Ts 漂移），
         # 初始速度取海浪平均速度。每个 iteration predict+update 用一份新原始短观测 z_b_short。
@@ -351,73 +354,64 @@ def run_single_trial(
             )
             uav_est_dfpc = uav_trajectory_dfpc.positions
 
-            # ---- 2) 短时间尺度 UAV KF（DPC 轨迹作先验、原始短观测 z_u 作似然）：
-            #        predict → 融合 DPC [位置,速度] 及协方差 →
-            #        update 用一份新的原始短观测 z_u_short_kf → consensus。
-            # The first short-time sample is already the filter's initial
-            # state; predicting before it would map the t=0 measurement onto
-            # t=Ts.  Every later step advances exactly one Ts.
-            if sidx > 0:
-                uav_kf_short.predict()
-            # Legacy path overwrites KF state with DPC then updates raw
-            # observations, which pulls the good DPC estimate back toward
-            # single-node noise.  The dpc_only branch instead treats DPC as a
-            # full trajectory pseudo-measurement so the KF fuses it properly.
-            if cfg.uav_kf_prior_mode == "none":
-                inject_position_state(uav_kf_short, uav_est_dfpc, cfg.uav_dpc_prior_noise_std)
-            else:
-                uav_kf_short.update_trajectory_measurement(
-                    uav_trajectory_dfpc.state,
-                    uav_trajectory_dfpc.covariance,
+            # ---- 2) 窗口级 UAV KF：K 份观测完整后才更新一次。
+            if iteration == iter_count - 1:
+                standard_extra_state = (
+                    cluster_uav_prior_state
+                    if cfg.uav_kf_prior_mode == "dpc_plus_cluster"
+                    else None
                 )
-                if (
-                    cfg.uav_kf_prior_mode == "dpc_plus_cluster"
-                    and cluster_uav_prior_state is not None
-                ):
-                    uav_kf_short.update_trajectory_measurement(
+                standard_extra_covariance = (
+                    cluster_uav_prior_covariance
+                    if standard_extra_state is not None
+                    else None
+                )
+                uav_kf_window = update_window_filter(
+                    uav_kf_window,
+                    uav_trajectory_dfpc,
+                    cfg,
+                    block_duration_s,
+                    state.W_global,
+                    state.W_global_gpu,
+                    standard_extra_state,
+                    standard_extra_covariance,
+                )
+                if cfg.enable_cluster and cfg.cluster_mode == "uav_prior":
+                    uav_kf_cluster_window = update_window_filter(
+                        uav_kf_cluster_window,
+                        uav_trajectory_dfpc,
+                        cfg,
+                        block_duration_s,
+                        state.W_global,
+                        state.W_global_gpu,
                         cluster_uav_prior_state,
                         cluster_uav_prior_covariance,
                     )
-            if cluster_uav_prior_state is not None and uav_kf_prior_short is not None:
-                if sidx > 0:
-                    uav_kf_prior_short.predict()
-                uav_kf_prior_short.update_trajectory_measurement(
-                    uav_trajectory_dfpc.state,
-                    uav_trajectory_dfpc.covariance,
-                )
-                uav_kf_prior_short.update_trajectory_measurement(
-                    cluster_uav_prior_state,
-                    cluster_uav_prior_covariance,
-                )
-            z_u_short_kf = p_u_true + rng_obs.normal(0.0, cfg.uav_obs_noise, size=(cfg.N, 3))
-            if sidx > 0:
-                uav_kf_short.update(z_u_short_kf)
-                if uav_kf_prior_short is not None:
-                    uav_kf_prior_short.update(z_u_short_kf)
-            uav_state_short_kf = uav_kf_short.x.copy()
-            uav_state_short_kf = backend.consensus_linear_accel(
-                state.W_global, state.W_global_gpu, uav_state_short_kf, 1
+                uav_kf_window_time_s = time_s
+                uav_kf_window_updates += 1
+
+            elapsed_from_window_s = (
+                0.0
+                if uav_kf_window_time_s is None
+                else time_s - uav_kf_window_time_s
             )
-            uav_kf_short.x = uav_state_short_kf.copy()
-            uav_kf_short.P = consensus_covariance(state.W_global, uav_kf_short.P)
-            uav_est_kf = uav_state_short_kf[:, :3]
-            kf_velocity = uav_state_short_kf[:, 3:]
+            uav_window_state = extrapolate_window_filter(
+                uav_kf_window,
+                elapsed_from_window_s,
+                uav_trajectory_dfpc,
+            )
+            uav_est_kf = uav_window_state[:, :3]
+            kf_velocity = uav_window_state[:, 3:]
             cluster_uav_est_kf = uav_est_kf
             cluster_kf_velocity = kf_velocity
-            if uav_kf_prior_short is not None:
-                uav_prior_state = uav_kf_prior_short.x.copy()
-                uav_prior_state = backend.consensus_linear_accel(
-                    state.W_global,
-                    state.W_global_gpu,
-                    uav_prior_state,
-                    1,
+            if uav_kf_cluster_window is not None:
+                cluster_window_state = extrapolate_window_filter(
+                    uav_kf_cluster_window,
+                    elapsed_from_window_s,
+                    uav_trajectory_dfpc,
                 )
-                uav_kf_prior_short.x = uav_prior_state.copy()
-                uav_kf_prior_short.P = consensus_covariance(
-                    state.W_global, uav_kf_prior_short.P
-                )
-                cluster_uav_est_kf = uav_prior_state[:, :3]
-                cluster_kf_velocity = uav_prior_state[:, 3:]
+                cluster_uav_est_kf = cluster_window_state[:, :3]
+                cluster_kf_velocity = cluster_window_state[:, 3:]
 
             # ---- 3) 短时间尺度节点 KF：predict（dt=Ts）+ 用一份新原始短观测 z_b 更新。
             #     浮标不做跨节点共识，每个节点只使用自己的 KF 状态。
@@ -530,7 +524,7 @@ def run_single_trial(
             node_kf_dfpc_result["uav_line_intercept_rmse"] = dfpc_result["uav_line_intercept_rmse"]
             node_kf_dfpc_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
 
-            # 短时间尺度 KF 方法的指标：位置用短尺度 UAV/节点 KF 后验。
+            # KF 方法指标：UAV 使用窗口级后验/外推，浮标使用短步节点 KF 后验。
             kf_result = evaluate_dfpc(
                 uav_est_kf,
                 node_est_kf,
@@ -821,22 +815,6 @@ def run_single_trial(
                     line_params=kf_line_params,
                 )
 
-        # ---- 长时间尺度 KF 更新：用本块短尺度 KF 收敛后的位置作为观测，更新 long KF
-        #      的 [x,y,z,vx,vy,vz]，使速度在块间逐步收敛；再做一次全局共识。
-        if block == 0:
-            # Block 0 starts at t=0; its first long-timescale observation is
-            # the short-scale estimate at t=(K-1)*Ts, so propagate K-1 steps
-            # before the update instead of applying a stale initial state.
-            predict_n_steps(uav_kf_long, cfg.K - 1)
-        uav_kf_long.update(uav_est_kf)
-        uav_kf_long.x = backend.consensus_linear_accel(
-            state.W_global,
-            state.W_global_gpu,
-            uav_kf_long.x,
-            1,
-        ).copy()
-        uav_kf_long.P = consensus_covariance(state.W_global, uav_kf_long.P)
-
     return {
         "metrics": metrics,
         "args": cfg.__dict__.copy(),
@@ -847,6 +825,8 @@ def run_single_trial(
         "trial_index": trial_index,
         "seed": seed,
         "physical_duration_s": (total_steps - 1) * float(cfg.Ts),
+        "uav_kf_window_updates": uav_kf_window_updates,
+        "uav_kf_window_size": int(cfg.K),
         "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }
@@ -1014,6 +994,8 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "compute_device": device,
         "debug_recorder": debug,
         "physical_duration_s": trials[0]["physical_duration_s"],
+        "uav_kf_window_updates": trials[0]["uav_kf_window_updates"],
+        "uav_kf_window_size": trials[0]["uav_kf_window_size"],
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
         "cluster_diagnostics": cluster_diagnostics,
