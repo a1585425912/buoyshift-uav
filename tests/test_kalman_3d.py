@@ -112,12 +112,17 @@ class Kalman3DTests(unittest.TestCase):
             Ts=0.2,
         )
         result = run_experiment(cfg)
-        self.assertEqual(result["uav_kf_window_updates"], cfg.T_long)
+        expected_updates = cfg.T_long * cfg.K - cfg.K + 1
+        self.assertEqual(result["uav_kf_window_updates"], expected_updates)
         self.assertEqual(result["uav_kf_window_size"], cfg.K)
         np.testing.assert_allclose(
             result["metrics"][METHOD_KF_DFPC]["uav_rmse"][: cfg.K - 1],
             result["metrics"][METHOD_DFPC]["uav_rmse"][: cfg.K - 1],
             atol=1e-12,
+        )
+        self.assertLess(
+            result["metrics"][METHOD_DFPC]["uav_velocity_rmse"][cfg.K],
+            cfg.uav_speed,
         )
 
     def test_subgraph_mode_and_diagnostics_are_exposed_end_to_end(self) -> None:

@@ -13,6 +13,7 @@ information and avoid angle wrap-around at +/-pi.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +33,7 @@ class LineEstimatorState:
     sum_t2: float
     sum_xyz: np.ndarray
     sum_txyz: np.ndarray
+    history: deque[tuple[float, np.ndarray]] | None = None
 
 
 @dataclass(frozen=True)
@@ -50,13 +52,16 @@ class TrajectoryPrediction:
         return self.state[:, 3:]
 
 
-def init_line_estimator(n: int) -> LineEstimatorState:
+def init_line_estimator(n: int, window_size: int | None = None) -> LineEstimatorState:
+    if window_size is not None and window_size < 1:
+        raise ValueError("window_size must be positive")
     return LineEstimatorState(
         count=0,
         sum_t=0.0,
         sum_t2=0.0,
         sum_xyz=np.zeros((n, 3), dtype=np.float64),
         sum_txyz=np.zeros((n, 3), dtype=np.float64),
+        history=None if window_size is None else deque(maxlen=int(window_size)),
     )
 
 
@@ -84,11 +89,21 @@ def update_local_line_estimates(
     if xyz.ndim != 2 or xyz.shape != state.sum_xyz.shape:
         raise ValueError(f"observations_xyz must have shape {state.sum_xyz.shape}")
     t = float(time_s)
+    if state.history is not None and len(state.history) == state.history.maxlen:
+        old_t, old_xyz = state.history.popleft()
+        state.count -= 1
+        state.sum_t -= old_t
+        state.sum_t2 -= old_t * old_t
+        state.sum_xyz -= old_xyz
+        state.sum_txyz -= old_t * old_xyz
+
     state.count += 1
     state.sum_t += t
     state.sum_t2 += t * t
     state.sum_xyz += xyz
     state.sum_txyz += t * xyz
+    if state.history is not None:
+        state.history.append((t, xyz.copy()))
 
     n_obs = float(state.count)
     denominator = n_obs * state.sum_t2 - state.sum_t * state.sum_t

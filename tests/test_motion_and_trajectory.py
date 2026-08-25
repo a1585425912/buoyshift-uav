@@ -59,6 +59,17 @@ class MotionModelTests(unittest.TestCase):
 
 
 class TrajectoryEstimatorTests(unittest.TestCase):
+    def test_sliding_window_drops_the_oldest_observation(self) -> None:
+        estimator = init_line_estimator(1, window_size=3)
+        update_local_line_estimates(estimator, 0.0, np.array([[100.0, 0.0, 0.0]]))
+        params = None
+        for time_s in [1.0, 2.0, 3.0]:
+            xyz = np.array([[time_s, 2.0 * time_s, 120.0]])
+            params = update_local_line_estimates(estimator, time_s, xyz)
+        assert params is not None
+        self.assertEqual(estimator.count, 3)
+        np.testing.assert_allclose(params[0, :6], [0.0, 1.0, 0.0, 2.0, 120.0, 0.0], atol=1e-12)
+
     def test_exact_straight_line_is_recovered(self) -> None:
         n = 5
         state = init_line_estimator(n)

@@ -3,9 +3,9 @@
 这个文件把各模块串起来：
 1. 初始化场景；
 2. 每个长块推进 K 个 Ts 短步并产生观测；
-3. block 内 K 次观测构成一个轨迹窗口；窗口结束时才用完整 UAV
-   轨迹 [位置,速度] 及协方差更新一次窗口级 KF；
-4. 窗口内部不做 UAV-KF 更新，只从上一窗口后验按匀速模型外推；
+3. 最近 K 次观测构成连续滑动轨迹窗口；预热完成后，每个短步都用完整 UAV
+   轨迹 [位置,速度] 及协方差更新窗口级 KF；
+4. 滑动窗口每次前移一个 Ts，不在长块边界清空轨迹信息；
 5. 多个 Monte Carlo trial 做平均。
 """
 
@@ -113,7 +113,7 @@ def update_window_filter(
     kf: BatchCVKalman3D | None,
     trajectory: TrajectoryPrediction,
     cfg: ExperimentConfig,
-    block_duration_s: float,
+    update_interval_s: float,
     weight_matrix: np.ndarray,
     weight_matrix_gpu: object,
     extra_trajectory_state: np.ndarray | None = None,
@@ -123,7 +123,7 @@ def update_window_filter(
     if kf is None:
         kf = make_cv3d_filter(
             trajectory.positions,
-            block_duration_s,
+            update_interval_s,
             cfg.uav_obs_noise,
             cfg.uav_kf_accel_std,
             cfg.uav_kf_initial_velocity_std,
@@ -221,6 +221,7 @@ def run_single_trial(
     uav_kf_cluster_window: BatchCVKalman3D | None = None
     uav_kf_window_time_s: float | None = None
     uav_kf_window_updates = 0
+    line_estimator = init_line_estimator(cfg.N, window_size=cfg.K)
     node_kf: BatchCVKalman3D | None = None
     node_kf_prior: BatchCVKalman3D | None = None
     cluster_localizer = (
@@ -240,8 +241,7 @@ def run_single_trial(
         metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
 
     for block in range(cfg.T_long):
-        # 每个长块是一个独立观测窗口；KF 只消费完整窗口的轨迹结果。
-        line_estimator = init_line_estimator(cfg.N)
+        # 长块只用于输出分段；轨迹窗口跨块连续滑动，不在边界重置。
         # The previous block ends at short step K-1. Advance once before the
         # next block so every recorded sample is exactly Ts apart and block
         # boundaries never duplicate the same physical instant.
@@ -251,7 +251,7 @@ def run_single_trial(
         time_s = block * block_duration_s
         p_u_true, buoy_true_short = current_truth(state)
         uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
-        # 每个节点只使用当前窗口内的观测拟合三维匀速轨迹。
+        # 每个节点只使用最近 K 份观测拟合三维匀速轨迹。
         line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
         local_trajectory_prediction = predict_trajectory(
             line_params_dfpc,
@@ -354,8 +354,8 @@ def run_single_trial(
             )
             uav_est_dfpc = uav_trajectory_dfpc.positions
 
-            # ---- 2) 窗口级 UAV KF：K 份观测完整后才更新一次。
-            if iteration == iter_count - 1:
+            # ---- 2) 滑动窗口 UAV KF：预热 K 份观测后，每个 Ts 更新一次。
+            if line_estimator.count >= cfg.K:
                 standard_extra_state = (
                     cluster_uav_prior_state
                     if cfg.uav_kf_prior_mode == "dpc_plus_cluster"
@@ -370,7 +370,7 @@ def run_single_trial(
                     uav_kf_window,
                     uav_trajectory_dfpc,
                     cfg,
-                    block_duration_s,
+                    cfg.Ts,
                     state.W_global,
                     state.W_global_gpu,
                     standard_extra_state,
@@ -381,7 +381,7 @@ def run_single_trial(
                         uav_kf_cluster_window,
                         uav_trajectory_dfpc,
                         cfg,
-                        block_duration_s,
+                        cfg.Ts,
                         state.W_global,
                         state.W_global_gpu,
                         cluster_uav_prior_state,
