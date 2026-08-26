@@ -65,42 +65,11 @@ def consensus_linear_accel(W_cpu: np.ndarray, W_gpu: Any, X: np.ndarray, steps: 
     return cp.asnumpy(Y).astype(np.float64, copy=False)
 
 
-def gaussian_drift_displacement(
+def gaussian_position_offsets(
     n: int,
-    mean_velocity: np.ndarray,
-    diffusion: float,
-    dt: float,
+    position_std: float,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """采样漂移—扩散位移 N(mean_velocity*dt, diffusion^2*dt*I)。"""
-    mean = np.asarray(mean_velocity, dtype=np.float64)
-    if mean.shape != (2,):
-        raise ValueError("mean_velocity must have shape (2,)")
-    safe_dt = max(float(dt), 0.0)
-    mean_displacement = mean * safe_dt
-    displacement_std = max(float(diffusion), 0.0) * np.sqrt(safe_dt)
-    return rng.normal(mean_displacement, displacement_std, size=(n, 2))
-
-
-def gaussian_short_offset_step(
-    n: int,
-    sigma_per_sqrt_second: float,
-    dt: float,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """生成零均值小尺度位移；标准差按 sqrt(dt) 缩放以保持时间步长一致性。"""
-    sigma = max(float(sigma_per_sqrt_second), 0.0) * np.sqrt(max(float(dt), 0.0))
+    """独立采样相对当前位移中心的二维零均值位置偏移。"""
+    sigma = max(float(position_std), 0.0)
     return rng.normal(0.0, sigma, size=(n, 2))
-
-
-def clip_offsets(offset: np.ndarray, radius: float) -> np.ndarray:
-    """把节点短时间尺度偏移限制在半径 radius 内，避免随机游走无限发散。"""
-    if radius <= 0.0:
-        return offset
-    norms = np.linalg.norm(offset, axis=1)
-    over = norms > radius
-    if np.any(over):
-        clipped = offset.copy()
-        clipped[over] *= (radius / np.maximum(norms[over], 1e-12))[:, None]
-        return clipped
-    return offset

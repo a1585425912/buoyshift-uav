@@ -28,7 +28,7 @@ class SceneState:
     W_global: np.ndarray
     W_global_gpu: object
 
-    # 节点真实位置 = 慢变中心 + 短时间尺度偏移。
+    # 节点真实位置 = 随洋流及累积小位移移动的中心 + 当前剩余随机偏移。
     buoy_center_true: np.ndarray
     buoy_offset_true: np.ndarray
 
@@ -36,11 +36,7 @@ class SceneState:
     uav_center_true: np.ndarray
     uav_velocity_true: np.ndarray
 
-    # 小尺度偏移的相关时间及吸收到慢变中心的时间常数，单位 s。
-    offset_correlation_time: float
-    center_absorb_time: float
-
-    # 海浪速度高斯分布的均值向量，单位 m/s。
+    # 固定洋流速度向量，单位 m/s。
     buoy_wave_mean_velocity: np.ndarray
 
 
@@ -50,7 +46,12 @@ def init_scene(cfg: ExperimentConfig, rng_scene: np.random.Generator) -> SceneSt
     W_global_gpu = backend.make_gpu_consensus_matrix(W_global, cfg)
     buoy_xy = sim.deploy_buoys_in_disk(cfg.N, cfg.area_radius, rng_scene)
     buoy_center_true = np.column_stack([buoy_xy, np.zeros(cfg.N, dtype=np.float64)])
-    buoy_offset_true = np.zeros((cfg.N, 3), dtype=np.float64)
+    buoy_offset_xy = backend.gaussian_position_offsets(
+        cfg.N, cfg.buoy_random_displacement_std, rng_scene
+    )
+    buoy_offset_true = np.column_stack(
+        [buoy_offset_xy, np.zeros(cfg.N, dtype=np.float64)]
+    )
 
     heading = np.deg2rad(cfg.heading_deg)
     uav_start_x = -0.65 * cfg.area_radius if cfg.uav_start_x is None else float(cfg.uav_start_x)
@@ -67,8 +68,6 @@ def init_scene(cfg: ExperimentConfig, rng_scene: np.random.Generator) -> SceneSt
         buoy_offset_true=buoy_offset_true,
         uav_center_true=uav_center_true,
         uav_velocity_true=uav_vel_true,
-        offset_correlation_time=max(float(cfg.buoy_offset_correlation_time), 1e-12),
-        center_absorb_time=max(float(cfg.buoy_center_absorb_time), 1e-12),
         buoy_wave_mean_velocity=float(cfg.buoy_wave_speed)
         * np.array(
             [np.cos(np.deg2rad(cfg.buoy_wave_heading_deg)), np.sin(np.deg2rad(cfg.buoy_wave_heading_deg)), 0.0]
@@ -84,34 +83,33 @@ def advance_truth_one_short_step(
 ) -> None:
     """推进一个短时间尺度真实状态。
 
-    UAV 按确定轨迹匀速运动；浮标位置由三部分构成：
-    1. 非零均值高斯海浪速度驱动慢变中心；
-    2. 零均值小尺度随机扰动形成有界偏移；
-    3. 一部分短偏移逐渐吸收到慢变中心。
+    UAV 按确定轨迹匀速运动。浮标中心按固定洋流速度和方向平移；
+    每个时刻独立采样一次零均值高斯小位移，其中固定比例累积到中心，
+    剩余部分作为当前时刻相对中心的偏移。
     """
     step_dt = float(cfg.Ts if dt is None else dt)
     if step_dt <= 0.0:
         raise ValueError("physical time step must be positive")
 
     state.uav_center_true = state.uav_center_true + state.uav_velocity_true * step_dt
-    wave_displacement_xy = backend.gaussian_drift_displacement(
-        cfg.N,
-        state.buoy_wave_mean_velocity[:2],
-        cfg.buoy_wave_diffusion,
-        step_dt,
-        rng_scene,
+    displacement_xy = backend.gaussian_position_offsets(
+        cfg.N, cfg.buoy_random_displacement_std, rng_scene
     )
-    delta_xy = backend.gaussian_short_offset_step(cfg.N, cfg.buoy_short_diffusion, step_dt, rng_scene)
-    delta = np.column_stack([delta_xy, np.zeros(cfg.N, dtype=np.float64)])
-    offset_memory = np.exp(-step_dt / state.offset_correlation_time)
-    center_absorb = 1.0 - np.exp(-step_dt / state.center_absorb_time)
-    state.buoy_offset_true = offset_memory * state.buoy_offset_true + delta
-    state.buoy_offset_true = backend.clip_offsets(state.buoy_offset_true, cfg.buoy_short_radius)
-    wave_displacement = np.column_stack([wave_displacement_xy, np.zeros(cfg.N, dtype=np.float64)])
-    center_shift = center_absorb * state.buoy_offset_true + wave_displacement
-    state.buoy_center_true = state.buoy_center_true + center_shift
-    state.buoy_offset_true = state.buoy_offset_true - center_absorb * state.buoy_offset_true
-    state.buoy_offset_true = backend.clip_offsets(state.buoy_offset_true, cfg.buoy_short_radius)
+    displacement = np.column_stack(
+        [displacement_xy, np.zeros(cfg.N, dtype=np.float64)]
+    )
+    accumulation_ratio = float(cfg.buoy_center_accumulation_ratio)
+    state.buoy_center_true = (
+        state.buoy_center_true
+        + state.buoy_wave_mean_velocity * step_dt
+        + accumulation_ratio * displacement
+    )
+    state.buoy_offset_true = np.column_stack(
+        [
+            (1.0 - accumulation_ratio) * displacement_xy,
+            np.zeros(cfg.N, dtype=np.float64),
+        ]
+    )
 
 
 def advance_truth_one_long_block(

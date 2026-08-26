@@ -180,7 +180,8 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
             "physical_duration_s": res["physical_duration_s"],
             "buoy_wave_speed_mps": cfg.buoy_wave_speed,
             "buoy_wave_heading_deg": cfg.buoy_wave_heading_deg,
-            "buoy_wave_diffusion_m_per_sqrt_s": cfg.buoy_wave_diffusion,
+            "buoy_random_displacement_std_m": cfg.buoy_random_displacement_std,
+            "buoy_center_accumulation_ratio": cfg.buoy_center_accumulation_ratio,
             "mc_trials": res["mc_trials"],
             "compute_device": res["compute_device"],
         }
@@ -239,7 +240,7 @@ This is the modular DPC experiment.
 
 Monte Carlo trials: {res['mc_trials']}. Global consensus device: `{res['compute_device']}`.
 Physical duration: {res['physical_duration_s']:.3f} s; block duration K*Ts={cfg.K * cfg.Ts:g} s; Ts={cfg.Ts:g} s.
-Buoy displacement over dt: N(mean speed={cfg.buoy_wave_speed:g} m/s at {cfg.buoy_wave_heading_deg:g} deg, diffusion={cfg.buoy_wave_diffusion:g} m/sqrt(s)).
+Buoy centers move at {cfg.buoy_wave_speed:g} m/s in the {cfg.buoy_wave_heading_deg:g} deg direction. At every time step, a random displacement with std={cfg.buoy_random_displacement_std:g} m per horizontal axis is sampled; {cfg.buoy_center_accumulation_ratio:g} of it accumulates into the center and the remainder is the instantaneous offset.
 Each buoy independently estimates the UAV trajectory. DPC reaches consensus on
 `[bx,vx,by,vy,bz,vz]` and unit flight direction `[dx,dy,dz]`.
 UAV+Node-KF DPC filters both UAV and buoy states as `[x,y,z,vx,vy,vz]` and uses 3-D ranges.

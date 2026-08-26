@@ -23,9 +23,10 @@ migrated into `sim_core.py`.
 
 `Ts` controls buoy integration, and each long block advances exactly `K` short
 physical steps, so the effective block duration is `K*Ts`. `TL` is kept only for
-CLI backward compatibility and is not used by the experiment loop. Buoy
-displacement follows a Gaussian drift-diffusion model with configurable non-zero
-mean speed (5 m/s by default).
+CLI backward compatibility and is not used by the experiment loop. Each buoy
+center moves continuously with a fixed current speed and direction. At every
+time step, a small random displacement is sampled; a configurable fraction
+accumulates into the center and the remainder is the instantaneous offset.
 
 ```powershell
 python uav_dfpc_modular_project/dfpc_experiment/run_experiment.py --mc_trials 20 --T_long 8 --K 30 --device cuda --out_dir uav_dfpc_modular_project/outputs/out_single

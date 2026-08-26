@@ -47,16 +47,15 @@ class ExperimentConfig:
     # TL: 兼容旧命令行参数的保留字段；当前物理时间轴由 K*Ts 决定，
     #     TL 不再参与主循环。
     # Ts: 浮标运动模型的数值积分子步，单位 s；不再与 K 绑定。
-    # buoy_short_*: 浮标相对慢变中心的小尺度有界扰动参数。
+    # buoy_random_displacement_std: 每个时刻相对当前中心独立采样的位置偏移标准差。
+    # buoy_center_accumulation_ratio: 每步随机小位移中累积到下一时刻中心的比例。
     # system_phase_std_deg: 额外系统相位误差，例如同步误差。
     uav_obs_noise: float = 3.0
     # Additive position-model uncertainty for the full DPC trajectory
     # pseudo-measurement; OLS supplies the remaining position/velocity covariance.
     uav_dpc_prior_noise_std: float = 0.3
-    buoy_short_radius: float = 1.0
-    buoy_short_diffusion: float = 0.08
-    buoy_offset_correlation_time: float = 1.2
-    buoy_center_absorb_time: float = 1.2
+    buoy_random_displacement_std: float = 0.5
+    buoy_center_accumulation_ratio: float = 0.1
     buoy_center_obs_noise: float = 1.0
     system_phase_std_deg: float = 3.0
 
@@ -71,12 +70,9 @@ class ExperimentConfig:
     buoy_kf_accel_std: float = 1.0
     buoy_kf_initial_velocity_std: float = 2.0
 
-    # 海浪驱动的非零均值二维高斯速度：
-    # 每个 dt 内位移 ~ N(mean_velocity*dt, buoy_wave_diffusion^2*dt*I)。
-    # 5 m/s 是用户指定的默认场景；如需更温和的浮标漂移可在命令行覆盖。
+    # 位移中心按固定洋流速度和方向确定性移动。
     buoy_wave_speed: float = 5.0
     buoy_wave_heading_deg: float = 0.0
-    buoy_wave_diffusion: float = 0.5
 
     # -------------------------
     # 通信/功率/共识参数
@@ -171,10 +167,16 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=ExperimentConfig.uav_dpc_prior_noise_std,
     )
-    parser.add_argument("--buoy_short_radius", type=float, default=ExperimentConfig.buoy_short_radius)
-    parser.add_argument("--buoy_short_diffusion", type=float, default=ExperimentConfig.buoy_short_diffusion)
-    parser.add_argument("--buoy_offset_correlation_time", type=float, default=ExperimentConfig.buoy_offset_correlation_time)
-    parser.add_argument("--buoy_center_absorb_time", type=float, default=ExperimentConfig.buoy_center_absorb_time)
+    parser.add_argument(
+        "--buoy_random_displacement_std",
+        type=float,
+        default=ExperimentConfig.buoy_random_displacement_std,
+    )
+    parser.add_argument(
+        "--buoy_center_accumulation_ratio",
+        type=float,
+        default=ExperimentConfig.buoy_center_accumulation_ratio,
+    )
     parser.add_argument("--buoy_center_obs_noise", type=float, default=ExperimentConfig.buoy_center_obs_noise)
     parser.add_argument("--system_phase_std_deg", type=float, default=ExperimentConfig.system_phase_std_deg)
     parser.add_argument("--uav_kf_accel_std", type=float, default=ExperimentConfig.uav_kf_accel_std)
@@ -184,7 +186,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--buoy_kf_initial_velocity_std", type=float, default=ExperimentConfig.buoy_kf_initial_velocity_std)
     parser.add_argument("--buoy_wave_speed", type=float, default=ExperimentConfig.buoy_wave_speed)
     parser.add_argument("--buoy_wave_heading_deg", type=float, default=ExperimentConfig.buoy_wave_heading_deg)
-    parser.add_argument("--buoy_wave_diffusion", type=float, default=ExperimentConfig.buoy_wave_diffusion)
 
     parser.add_argument("--tx_power", type=float, default=ExperimentConfig.tx_power)
     parser.add_argument("--path_loss_alpha", type=float, default=ExperimentConfig.path_loss_alpha)
@@ -285,6 +286,8 @@ def validate_config(cfg: ExperimentConfig) -> None:
         raise ValueError("cluster_constraint_type must be 'vector' or 'range'")
     if not 0.0 <= cfg.cluster_alpha <= 1.0:
         raise ValueError("cluster_alpha must be in [0, 1]")
+    if not 0.0 <= cfg.buoy_center_accumulation_ratio <= 1.0:
+        raise ValueError("buoy_center_accumulation_ratio must be in [0, 1]")
     if cfg.cluster_localization_iterations < 1:
         raise ValueError("cluster_localization_iterations must be positive")
     if cfg.uav_kf_prior_mode not in {"none", "dpc_only", "dpc_plus_cluster"}:
@@ -293,13 +296,9 @@ def validate_config(cfg: ExperimentConfig) -> None:
         "uav_speed": cfg.uav_speed,
         "uav_obs_noise": cfg.uav_obs_noise,
         "uav_dpc_prior_noise_std": cfg.uav_dpc_prior_noise_std,
-        "buoy_short_radius": cfg.buoy_short_radius,
-        "buoy_short_diffusion": cfg.buoy_short_diffusion,
-        "buoy_offset_correlation_time": cfg.buoy_offset_correlation_time,
-        "buoy_center_absorb_time": cfg.buoy_center_absorb_time,
+        "buoy_random_displacement_std": cfg.buoy_random_displacement_std,
         "buoy_center_obs_noise": cfg.buoy_center_obs_noise,
         "buoy_wave_speed": cfg.buoy_wave_speed,
-        "buoy_wave_diffusion": cfg.buoy_wave_diffusion,
         "uav_kf_accel_std": cfg.uav_kf_accel_std,
         "uav_kf_initial_velocity_std": cfg.uav_kf_initial_velocity_std,
         "buoy_kf_accel_std": cfg.buoy_kf_accel_std,

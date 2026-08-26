@@ -22,21 +22,61 @@ from dfpc_experiment.trajectory import (
 
 
 class MotionModelTests(unittest.TestCase):
-    def test_wave_increment_has_configured_nonzero_mean(self) -> None:
+    def test_center_moves_exactly_with_fixed_current(self) -> None:
         cfg = ExperimentConfig(
             N=400,
             device="cpu",
             buoy_wave_speed=5.0,
             buoy_wave_heading_deg=0.0,
-            buoy_wave_diffusion=0.5,
-            buoy_short_diffusion=0.0,
+            buoy_random_displacement_std=0.0,
         )
         rng = np.random.default_rng(7)
         state = init_scene(cfg, rng)
         before = state.buoy_center_true.copy()
         advance_truth_one_short_step(cfg, state, rng, dt=0.2)
-        mean_displacement = np.mean(state.buoy_center_true - before, axis=0)
-        np.testing.assert_allclose(mean_displacement, [1.0, 0.0, 0.0], atol=0.02)
+        np.testing.assert_allclose(
+            state.buoy_center_true - before,
+            np.tile([1.0, 0.0, 0.0], (cfg.N, 1)),
+            atol=1e-12,
+        )
+
+    def test_position_offset_is_resampled_around_current_center(self) -> None:
+        cfg = ExperimentConfig(
+            N=1_000,
+            device="cpu",
+            buoy_wave_speed=0.0,
+            buoy_random_displacement_std=0.4,
+            buoy_center_accumulation_ratio=0.0,
+        )
+        rng = np.random.default_rng(17)
+        state = init_scene(cfg, rng)
+        previous_offset = state.buoy_offset_true.copy()
+        advance_truth_one_short_step(cfg, state, rng, dt=0.2)
+        self.assertFalse(np.array_equal(state.buoy_offset_true, previous_offset))
+        np.testing.assert_allclose(np.mean(state.buoy_offset_true, axis=0), [0.0, 0.0, 0.0], atol=0.04)
+        np.testing.assert_allclose(np.std(state.buoy_offset_true[:, :2], axis=0), [0.4, 0.4], atol=0.03)
+        correlation = np.corrcoef(previous_offset[:, 0], state.buoy_offset_true[:, 0])[0, 1]
+        self.assertLess(abs(correlation), 0.1)
+        np.testing.assert_allclose(state.buoy_offset_true[:, 2], 0.0, atol=0.0)
+
+    def test_random_displacement_partly_accumulates_into_center(self) -> None:
+        cfg = ExperimentConfig(
+            N=100,
+            device="cpu",
+            buoy_wave_speed=0.0,
+            buoy_random_displacement_std=0.4,
+            buoy_center_accumulation_ratio=0.25,
+        )
+        rng = np.random.default_rng(23)
+        state = init_scene(cfg, rng)
+        previous_center = state.buoy_center_true.copy()
+        advance_truth_one_short_step(cfg, state, rng, dt=0.2)
+        center_shift = state.buoy_center_true - previous_center
+        np.testing.assert_allclose(
+            center_shift,
+            state.buoy_offset_true * (0.25 / 0.75),
+            atol=1e-12,
+        )
 
     def test_long_block_advances_exactly_K_short_steps(self) -> None:
         cfg = ExperimentConfig(
@@ -48,8 +88,7 @@ class MotionModelTests(unittest.TestCase):
             uav_speed=20.0,
             heading_deg=0.0,
             buoy_wave_speed=0.0,
-            buoy_wave_diffusion=0.0,
-            buoy_short_diffusion=0.0,
+            buoy_random_displacement_std=0.0,
         )
         rng = np.random.default_rng(11)
         state = init_scene(cfg, rng)
