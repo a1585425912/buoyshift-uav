@@ -9,7 +9,7 @@ migrated into `sim_core.py`.
 - `config.py`: all experiment parameters and CLI options.
 - `scenario.py`: node/UAV deployment, motion model, and observation model.
 - `trajectory.py`: each buoy independently estimates a 3-D UAV line and its OLS uncertainty; DPC reaches consensus on the line and predicts the full current `[position, velocity]` state.
-- `kalman.py`: batched 3-D constant-velocity Kalman filters; one complete trajectory initializes the UAV filter, then each new consensused position observation is consumed exactly once.
+- `kalman.py`: batched 3-D constant-velocity Kalman filters; UAV and buoy filters initialize at step 0 and remain recursive.
 - `metrics.py`: DPC power, phase error, RMSE, and single-node gain metrics.
 - `experiment.py`: single-trial and Monte Carlo experiment loops.
 - `plots.py`: CSV, NPZ, PNG, and Markdown outputs.
@@ -32,12 +32,13 @@ python uav_dfpc_modular_project/dfpc_experiment/run_experiment.py --mc_trials 20
 ```
 
 The experiment retains only the linear 3-D constant-velocity Kalman filter.
-The UAV filter waits for the first `K` observations and is initialized once
-from their fitted trajectory.  Its posterior then owns all historical
-information, and each later `Ts` update consumes only the newly arrived
-position observation.  Predicted states and observations are consensused
-separately, and the update uses the effective covariance of the consensused
-observation; neither long-block boundaries nor rolling OLS reset the filter.
+`K` controls only the buoy-motion/output block length.  The UAV filter is
+initialized from the step-0 position with an uncertain velocity prior.  At
+step 1 and every later `Ts`, it predicts from the previous posterior and
+consumes only the newly arrived position observation.  Predicted states and
+observations are consensused separately, and the update uses the effective
+covariance of the consensused observation.  UAV trajectory statistics and KF
+state both retain history across long-block boundaries.
 Outputs compare the no-algorithm baseline, ordinary DPC, clustered DPC,
 UAV+node Kalman DPC, and its clustered position-correction variant.
 

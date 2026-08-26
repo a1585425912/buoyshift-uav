@@ -7,7 +7,7 @@
 - `dfpc_experiment/config.py`：实验参数和命令行接口，优先修改这里。
 - `dfpc_experiment/scenario.py`：UAV、节点位置和观测模型。
 - `dfpc_experiment/trajectory.py`：节点在线估计 UAV 匀速轨迹，并输出位置、速度及协方差。
-- `dfpc_experiment/kalman.py`：UAV 与浮标的批量三维恒速 Kalman 滤波；UAV KF 直接融合六维轨迹观测。
+- `dfpc_experiment/kalman.py`：UAV 与浮标的批量三维恒速 Kalman 滤波；两者都从 step 0 开始持续递推。
 - `dfpc_experiment/sim_core.py`：从旧仿真文件迁移来的基础数学函数。
 - `dfpc_experiment/experiment.py`：单次完整实验和 Monte Carlo 主循环。
 - `dfpc_experiment/sweeps.py`：敏感性分析实验。
@@ -28,10 +28,10 @@ python uav_dfpc_modular_project\dfpc_experiment\run_experiment.py --device cpu
 `TL` 仅为兼容旧命令行参数保留，不再参与实验主循环。
 所有 DPC 距离均由三维坐标计算；当前 UAV 高度固定为 120 m、浮标高度固定为 0 m，
 但 KF 状态已保留 `z` 和 `vz`，以后可以直接接入高度变化。
-普通 DPC 仍使用最近 `K` 份观测的滚动共识轨迹计算相位。KF-DPC 只用最初
-`K` 份观测拟合的位置、速度和 OLS 协方差初始化一次 UAV KF；此后历史信息
-保存在持续递归的 KF 后验中。每个 `Ts` 先分别对预测状态和当前新增的位置观测
-执行一次邻域共识，再按共识观测的有效协方差更新 KF；每份原始观测只进入一次。
+`K` 只定义浮标运动和输出长块中的物理短步数，不控制 UAV-KF 的启动或重置。
+UAV-KF 在 step 0 由首份位置观测初始化，并保留较大的初始速度不确定度；step 1
+开始使用上一时刻后验执行预测，再融合当前新增位置观测。UAV 轨迹统计跨块累计，
+KF 后验也全程持续递推，每份原始观测只进入一次。
 
 运行一个较小的调试实验：
 

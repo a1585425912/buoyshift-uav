@@ -16,26 +16,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .config import ExperimentConfig
-from .constants import (
-    METHOD_CLUSTER_KF_DFPC,
-    METHOD_DFPC,
-    METHOD_KF_DFPC,
-    METHODS,
-    METRIC_KEYS,
-)
+from .constants import METHOD_DFPC, METHODS, METRIC_KEYS
 from .io_utils import write_rows
 from .metrics import tail_summary
-
-
-UAV_KF_METHODS = {METHOD_KF_DFPC, METHOD_CLUSTER_KF_DFPC}
-
-
-def metric_values_for_plot(method: str, values: np.ndarray, cfg: ExperimentConfig) -> np.ndarray:
-    """Hide the DPC placeholder used before a UAV-KF estimate actually exists."""
-    plotted = np.asarray(values, dtype=np.float64).copy()
-    if method in UAV_KF_METHODS:
-        plotted[: max(cfg.K - 1, 0)] = np.nan
-    return plotted
 
 
 def plot_metric(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig, out_dir: Path, key: str, ylabel: str, filename: str) -> None:
@@ -48,7 +31,7 @@ def plot_metric(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig
     steps = np.arange(cfg.T_long * iter_count)
     plt.figure(figsize=(11, 6))
     for method in metrics:
-        vals = metric_values_for_plot(method, metrics[method][key], cfg)
+        vals = metrics[method][key]
         if np.all(np.isnan(vals)):
             continue
         plt.plot(steps, vals, linewidth=1.8, label=method)
@@ -56,20 +39,9 @@ def plot_metric(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig
         plt.axhline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
     for block in range(1, cfg.T_long):
         plt.axvline(block * cfg.K, color="black", linewidth=0.4, alpha=0.12)
-    if cfg.K > 1 and any(method in metrics for method in UAV_KF_METHODS):
-        ready_step = cfg.K - 1
-        plt.axvspan(0, ready_step, color="gray", alpha=0.06)
-        plt.axvline(
-            ready_step,
-            color="gray",
-            linestyle="--",
-            linewidth=1.0,
-            alpha=0.75,
-            label=f"UAV-KF ready (K={cfg.K})",
-        )
     plt.xlabel("Time step")
     plt.ylabel(ylabel)
-    plt.title(f"{cfg.fc_mhz:.0f} MHz trajectory-initialized recursive-KF DPC: {ylabel}")
+    plt.title(f"{cfg.fc_mhz:.0f} MHz step-0 recursive-KF DPC: {ylabel}")
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=9)
     plt.tight_layout()

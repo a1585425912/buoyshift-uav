@@ -113,6 +113,13 @@ def initialize_uav_filter(
     )
     kf.x = trajectory.state.copy()
     kf.P = trajectory.covariance.copy()
+    # At step 0 only position is observed.  Velocity is an unobserved prior and
+    # must keep its configured uncertainty instead of inheriting an artificial
+    # reduction from spatial consensus of identical zero-velocity placeholders.
+    velocity_var = max(float(cfg.uav_kf_initial_velocity_std), 1e-9) ** 2
+    kf.P[:, :3, 3:] = 0.0
+    kf.P[:, 3:, :3] = 0.0
+    kf.P[:, 3:, 3:] = velocity_var * np.eye(3)[None, :, :]
 
     if extra_trajectory_state is not None:
         if extra_trajectory_covariance is None:
@@ -221,7 +228,9 @@ def run_single_trial(
     uav_kf_cluster: BatchCVKalman3D | None = None
     uav_kf_trajectory_initializations = 0
     uav_kf_position_updates = 0
-    line_estimator = init_line_estimator(cfg.N, window_size=cfg.K)
+    # UAV trajectory statistics retain the complete history.  K belongs to the
+    # buoy short-time motion/output block and does not reset or gate the UAV KF.
+    line_estimator = init_line_estimator(cfg.N)
     node_kf: BatchCVKalman3D | None = None
     node_kf_prior: BatchCVKalman3D | None = None
     cluster_localizer = (
@@ -355,8 +364,8 @@ def run_single_trial(
             )
             uav_est_dfpc = uav_trajectory_dfpc.positions
 
-            # ---- 2) 持久 UAV KF：完整轨迹只初始化一次，随后每份新观测只更新一次。
-            if uav_kf is None and line_estimator.count >= cfg.K:
+            # ---- 2) 持久 UAV KF：step 0 初始化；step 1 起由上一后验递推。
+            if uav_kf is None:
                 standard_extra_state = (
                     cluster_uav_prior_state
                     if cfg.uav_kf_prior_mode == "dpc_plus_cluster"
@@ -825,7 +834,8 @@ def run_single_trial(
         "uav_kf_window_updates": uav_kf_trajectory_initializations,
         "uav_kf_trajectory_initializations": uav_kf_trajectory_initializations,
         "uav_kf_position_updates": uav_kf_position_updates,
-        "uav_kf_window_size": int(cfg.K),
+        "uav_kf_initialization_step": 0,
+        "uav_kf_window_size": 1,
         "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }
@@ -996,6 +1006,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "uav_kf_window_updates": trials[0]["uav_kf_window_updates"],
         "uav_kf_trajectory_initializations": trials[0]["uav_kf_trajectory_initializations"],
         "uav_kf_position_updates": trials[0]["uav_kf_position_updates"],
+        "uav_kf_initialization_step": trials[0]["uav_kf_initialization_step"],
         "uav_kf_window_size": trials[0]["uav_kf_window_size"],
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
