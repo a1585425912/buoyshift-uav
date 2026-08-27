@@ -8,7 +8,8 @@ migrated into `sim_core.py`.
 
 - `config.py`: all experiment parameters and CLI options.
 - `scenario.py`: node/UAV deployment, motion model, and observation model.
-- `trajectory.py`: each buoy independently estimates a 3-D UAV line and its OLS uncertainty; DPC reaches consensus on the line and predicts the full current `[position, velocity]` state.
+- `trajectory.py`: each buoy uses its continuous observation history to estimate the current 3-D UAV `[position, velocity]` state and uncertainty.
+- `dpc.py`: communication-matrix state fusion, spatial convergence tracking, phase output, and the update-then-communicate KF-DPC step.
 - `kalman.py`: batched 3-D constant-velocity Kalman filters; UAV and buoy filters initialize at step 0 and remain recursive.
 - `metrics.py`: DPC power, phase error, RMSE, and single-node gain metrics.
 - `experiment.py`: single-trial and Monte Carlo experiment loops.
@@ -33,13 +34,14 @@ python uav_dfpc_modular_project/dfpc_experiment/run_experiment.py --mc_trials 20
 ```
 
 The experiment retains only the linear 3-D constant-velocity Kalman filter.
-`K` controls only the buoy-motion/output block length.  The UAV filter is
-initialized from the step-0 position with an uncertain velocity prior.  At
-step 1 and every later `Ts`, it predicts from the previous posterior and
-consumes only the newly arrived position observation.  Predicted states and
-observations are consensused separately, and the update uses the effective
-covariance of the consensused observation.  UAV trajectory statistics and KF
-state both retain history across long-block boundaries.
+`K` controls only the buoy-motion/output block length. The UAV and node filters
+are initialized once at physical step 0. At every later `Ts`, each UAV filter
+predicts from its own previous posterior and updates from the node's current
+trajectory-state observation; only then does `W` fuse the UAV posterior states
+and covariances. Node states are distinct physical targets and are therefore
+not averaged across buoys. Trajectory statistics and both KF states retain
+history across long-block boundaries. Convergence is simultaneous network
+agreement in UAV position and velocity, not state change between time steps.
 Outputs compare the no-algorithm baseline, ordinary DPC, clustered DPC,
 UAV+node Kalman DPC, and its clustered position-correction variant.
 

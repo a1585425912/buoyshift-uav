@@ -85,6 +85,11 @@ class ExperimentConfig:
     path_loss_alpha: float = 1.0
     global_connectivity: float = 0.03
     uav_consensus_steps: int = 3
+    # Network convergence is spatial agreement among simultaneous UAV state
+    # estimates, not the difference between k and k-1 for a moving UAV.
+    dpc_consensus_position_tol_m: float = 1.0
+    dpc_consensus_velocity_tol_mps: float = 0.2
+    dpc_consensus_hold_steps: int = 3
     n_clusters: int = 40
     # Legacy trajectory/localization modes use this scalar.  The default
     # subgraph mode consumes the intra-subgraph peer estimate directly.
@@ -191,6 +196,21 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--path_loss_alpha", type=float, default=ExperimentConfig.path_loss_alpha)
     parser.add_argument("--global_connectivity", type=float, default=ExperimentConfig.global_connectivity)
     parser.add_argument("--uav_consensus_steps", type=int, default=ExperimentConfig.uav_consensus_steps)
+    parser.add_argument(
+        "--dpc_consensus_position_tol_m",
+        type=float,
+        default=ExperimentConfig.dpc_consensus_position_tol_m,
+    )
+    parser.add_argument(
+        "--dpc_consensus_velocity_tol_mps",
+        type=float,
+        default=ExperimentConfig.dpc_consensus_velocity_tol_mps,
+    )
+    parser.add_argument(
+        "--dpc_consensus_hold_steps",
+        type=int,
+        default=ExperimentConfig.dpc_consensus_hold_steps,
+    )
     parser.add_argument("--n_clusters", type=int, default=ExperimentConfig.n_clusters)
     parser.add_argument("--cluster_alpha", type=float, default=ExperimentConfig.cluster_alpha)
     parser.add_argument(
@@ -290,12 +310,16 @@ def validate_config(cfg: ExperimentConfig) -> None:
         raise ValueError("buoy_center_accumulation_ratio must be in [0, 1]")
     if cfg.cluster_localization_iterations < 1:
         raise ValueError("cluster_localization_iterations must be positive")
+    if cfg.dpc_consensus_hold_steps < 1:
+        raise ValueError("dpc_consensus_hold_steps must be positive")
     if cfg.uav_kf_prior_mode not in {"none", "dpc_only", "dpc_plus_cluster"}:
         raise ValueError("uav_kf_prior_mode must be 'none', 'dpc_only' or 'dpc_plus_cluster'")
     nonnegative = {
         "uav_speed": cfg.uav_speed,
         "uav_obs_noise": cfg.uav_obs_noise,
         "uav_dpc_prior_noise_std": cfg.uav_dpc_prior_noise_std,
+        "dpc_consensus_position_tol_m": cfg.dpc_consensus_position_tol_m,
+        "dpc_consensus_velocity_tol_mps": cfg.dpc_consensus_velocity_tol_mps,
         "buoy_random_displacement_std": cfg.buoy_random_displacement_std,
         "buoy_center_obs_noise": cfg.buoy_center_obs_noise,
         "buoy_wave_speed": cfg.buoy_wave_speed,

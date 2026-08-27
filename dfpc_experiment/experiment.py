@@ -3,8 +3,8 @@
 这个文件把各模块串起来：
 1. 初始化场景；
 2. 每个长块推进 K 个 Ts 短步并产生观测；
-3. 前 K 次观测拟合完整 UAV 轨迹 [位置,速度] 及协方差，只初始化一次 KF；
-4. 此后 KF 后验保存全部历史信息，每个短步只融合当前新增的位置观测；
+3. 每个节点用连续观测拟合 UAV 轨迹 [位置,速度] 及协方差；
+4. DPC 对当前轨迹状态做通信更新，KF-DPC 先本地滤波再通信更新；
 5. 多个 Monte Carlo trial 做平均。
 """
 
@@ -36,6 +36,12 @@ from .constants import (
     METRIC_KEYS,
 )
 from .debug_tools import DebugRecorder
+from .dpc import (
+    ConsensusTracker,
+    conservative_consensus_covariance,
+    dpc_state_update,
+    kf_dpc_state_update,
+)
 from .kalman import (
     BatchCVKalman3D,
     make_cv3d_filter,
@@ -52,7 +58,6 @@ from .trajectory import (
     INTERCEPT_COLUMNS,
     VELOCITY_COLUMNS,
     TrajectoryPrediction,
-    consensus_independent_covariance,
     init_line_estimator,
     normalize_trajectory_directions,
     predict_positions,
@@ -64,34 +69,22 @@ from .trajectory import (
 
 
 def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
-    """Conservatively mix covariance after consensus with unknown correlation."""
-    weights = np.asarray(W, dtype=np.float64)
-    covariance = np.asarray(P, dtype=np.float64)
-    if weights.shape[0] != weights.shape[1] or weights.shape[0] != covariance.shape[0]:
-        raise ValueError("W and P must have matching leading dimensions")
-    return np.einsum("ij,jkl->ikl", weights, covariance)
+    """Backward-compatible export of conservative posterior covariance fusion."""
+    return conservative_consensus_covariance(W, P)
 
 
 def dpc_trajectory_prediction(
-    line_params: np.ndarray,
     local_prediction: TrajectoryPrediction,
     weight_matrix: np.ndarray,
     position_model_std: float,
     velocity_model_std: float,
-    time_s: float,
 ) -> TrajectoryPrediction:
-    """Build the full-state DPC pseudo-measurement after one consensus step."""
-    covariance = consensus_independent_covariance(
+    """Build the current DPC UAV state after the communication update."""
+    return dpc_state_update(
+        local_prediction,
         weight_matrix,
-        local_prediction.covariance,
-    )
-    position_model_var = max(float(position_model_std), 0.0) ** 2
-    covariance[:, :3, :3] += position_model_var * np.eye(3)[None, :, :]
-    velocity_model_var = max(float(velocity_model_std), 0.0) ** 2
-    covariance[:, 3:, 3:] += velocity_model_var * np.eye(3)[None, :, :]
-    return TrajectoryPrediction(
-        state=trajectory_state_at_time(line_params, time_s),
-        covariance=covariance,
+        position_model_std,
+        velocity_model_std,
     )
 
 
@@ -99,10 +92,12 @@ def initialize_uav_filter(
     trajectory: TrajectoryPrediction,
     cfg: ExperimentConfig,
     update_interval_s: float,
+    weight_matrix: np.ndarray,
+    weight_matrix_gpu: object,
     extra_trajectory_state: np.ndarray | None = None,
     extra_trajectory_covariance: np.ndarray | None = None,
 ) -> BatchCVKalman3D:
-    """Initialize one persistent UAV KF from an already-consensused trajectory."""
+    """Initialize local UAV posteriors, then perform the first W update."""
     kf = make_cv3d_filter(
         trajectory.positions,
         update_interval_s,
@@ -129,18 +124,6 @@ def initialize_uav_filter(
             extra_trajectory_covariance,
         )
 
-    return kf
-
-
-def update_uav_filter(
-    kf: BatchCVKalman3D,
-    position_observation: np.ndarray,
-    weight_matrix: np.ndarray,
-    weight_matrix_gpu: object,
-    measurement_std: float,
-) -> None:
-    """Advance the persistent KF using one consensused position sample."""
-    kf.predict()
     kf.x = backend.consensus_linear_accel(
         weight_matrix,
         weight_matrix_gpu,
@@ -149,18 +132,17 @@ def update_uav_filter(
     ).copy()
     kf.P = consensus_covariance(weight_matrix, kf.P)
 
-    consensus_observation = backend.consensus_linear_accel(
-        weight_matrix,
-        weight_matrix_gpu,
-        position_observation,
-        1,
-    )
-    observation_variance = (
-        max(float(measurement_std), 1e-9) ** 2
-        * np.sum(np.asarray(weight_matrix, dtype=np.float64) ** 2, axis=1)
-    )
-    observation_covariance = observation_variance[:, None, None] * np.eye(3)[None, :, :]
-    kf.update_position_covariance(consensus_observation, observation_covariance)
+    return kf
+
+
+def update_uav_filter(
+    kf: BatchCVKalman3D,
+    local_trajectory: TrajectoryPrediction,
+    weight_matrix: np.ndarray,
+    weight_matrix_gpu: object,
+) -> None:
+    """Advance from k-1, update locally at k, then fuse posterior states."""
+    kf_dpc_state_update(kf, local_trajectory, weight_matrix, weight_matrix_gpu)
 
 
 def run_single_trial(
@@ -231,6 +213,16 @@ def run_single_trial(
     # UAV trajectory statistics retain the complete history.  K belongs to the
     # buoy short-time motion/output block and does not reset or gate the UAV KF.
     line_estimator = init_line_estimator(cfg.N)
+    dpc_convergence = ConsensusTracker(
+        cfg.dpc_consensus_position_tol_m,
+        cfg.dpc_consensus_velocity_tol_mps,
+        cfg.dpc_consensus_hold_steps,
+    )
+    kf_dpc_convergence = ConsensusTracker(
+        cfg.dpc_consensus_position_tol_m,
+        cfg.dpc_consensus_velocity_tol_mps,
+        cfg.dpc_consensus_hold_steps,
+    )
     node_kf: BatchCVKalman3D | None = None
     node_kf_prior: BatchCVKalman3D | None = None
     cluster_localizer = (
@@ -246,6 +238,14 @@ def run_single_trial(
         "effective_peer_count_mean": np.full(total_steps, np.nan, dtype=np.float64),
         "nodes_with_subgraph_peers": np.zeros(total_steps, dtype=np.int64),
     }
+    consensus_diagnostics = {
+        "dpc_position_disagreement_m": np.zeros(total_steps, dtype=np.float64),
+        "dpc_velocity_disagreement_mps": np.zeros(total_steps, dtype=np.float64),
+        "dpc_phase_ready": np.zeros(total_steps, dtype=bool),
+        "kf_dpc_position_disagreement_m": np.zeros(total_steps, dtype=np.float64),
+        "kf_dpc_velocity_disagreement_mps": np.zeros(total_steps, dtype=np.float64),
+        "kf_dpc_phase_ready": np.zeros(total_steps, dtype=bool),
+    }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
         metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
 
@@ -260,18 +260,18 @@ def run_single_trial(
         time_s = block * block_duration_s
         p_u_true, buoy_true_short = current_truth(state)
         uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
-        # 每个节点只使用最近 K 份观测拟合三维匀速轨迹。
-        line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
+        # 每个节点持续累积历史观测，拟合三维匀速轨迹；长块边界不清空。
+        local_line_params = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
         local_trajectory_prediction = predict_trajectory(
-            line_params_dfpc,
+            local_line_params,
             line_estimator,
             time_s,
             cfg.uav_obs_noise,
             cfg.uav_kf_initial_velocity_std,
         )
 
-        # 节点（浮标）短时间尺度 KF：dt=Ts，velocity_propagate=True（浮标随 Ts 漂移），
-        # 初始速度取海浪平均速度。每个 iteration predict+update 用一份新原始短观测 z_b_short。
+        # 节点（浮标）持久 KF：dt=Ts，初始速度取洋流平均速度；它与 UAV-KF
+        # 一样跨所有物理时刻递推，不存在独立的“短尺度 KF”或块边界重置。
         if node_kf is None:
             node_kf = make_cv3d_filter(
                 buoy_obs_short,
@@ -305,9 +305,9 @@ def run_single_trial(
                 time_s = (block * cfg.K + iteration) * float(cfg.Ts)
                 p_u_true, buoy_true_short = current_truth(state)
                 uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
-                line_params_dfpc = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
+                local_line_params = update_local_line_estimates(line_estimator, time_s, uav_obs_short)
                 local_trajectory_prediction = predict_trajectory(
-                    line_params_dfpc,
+                    local_line_params,
                     line_estimator,
                     time_s,
                     cfg.uav_obs_noise,
@@ -315,7 +315,7 @@ def run_single_trial(
                 )
 
             # 解除“block 内真值固定”：除 iteration 0 外，每个短步都推进一个 Ts 后重新观测。
-            # ---- 1) 短时间尺度 DPC：对三维轨迹、三轴速度和单位航向做一次邻居共识。
+            # ---- 1) DPC：各节点先从连续观测估计当前 [位置,速度]，再用 W 更新状态。
             cluster_uav_prior_state = None
             cluster_uav_prior_covariance = None
             needs_cluster_uav_initialization = (
@@ -324,7 +324,7 @@ def run_single_trial(
             )
             if cfg.enable_cluster and needs_cluster_uav_initialization:
                 cluster_prior_line_params = cluster_trajectory_consensus(
-                    line_params_dfpc,
+                    local_line_params,
                     state.W_global,
                     cluster_labels,
                     consensus_steps=cfg.cluster_localization_iterations,
@@ -347,24 +347,27 @@ def run_single_trial(
                     max(float(cfg.cluster_trajectory_noise_std), 0.0) ** 2
                     * np.eye(3)[None, :, :]
                 )
-            line_params_dfpc = backend.consensus_linear_accel(
-                state.W_global,
-                state.W_global_gpu,
-                line_params_dfpc,
-                1,
-            )
-            line_params_dfpc = normalize_trajectory_directions(line_params_dfpc)
             uav_trajectory_dfpc = dpc_trajectory_prediction(
-                line_params_dfpc,
                 local_trajectory_prediction,
                 state.W_global,
                 cfg.uav_dpc_prior_noise_std,
                 cfg.uav_kf_accel_std * cfg.Ts,
-                time_s,
             )
             uav_est_dfpc = uav_trajectory_dfpc.positions
+            line_params_dfpc = trajectory_state_from_position_velocity(
+                uav_est_dfpc,
+                uav_trajectory_dfpc.velocities,
+                time_s,
+            )
+            dpc_pos_error, dpc_vel_error, dpc_ready = dpc_convergence.update(
+                uav_trajectory_dfpc.state
+            )
+            consensus_diagnostics["dpc_position_disagreement_m"][sidx] = dpc_pos_error
+            consensus_diagnostics["dpc_velocity_disagreement_mps"][sidx] = dpc_vel_error
+            consensus_diagnostics["dpc_phase_ready"][sidx] = dpc_ready
 
-            # ---- 2) 持久 UAV KF：step 0 初始化；step 1 起由上一后验递推。
+            # ---- 2) 持久 UAV KF：k=0 初始化；k>=1 由 k-1 后验预测，
+            #          使用本地轨迹观测更新，最后才通过 W 融合 UAV 后验。
             if uav_kf is None:
                 standard_extra_state = (
                     cluster_uav_prior_state
@@ -377,17 +380,21 @@ def run_single_trial(
                     else None
                 )
                 uav_kf = initialize_uav_filter(
-                    uav_trajectory_dfpc,
+                    local_trajectory_prediction,
                     cfg,
                     cfg.Ts,
+                    state.W_global,
+                    state.W_global_gpu,
                     standard_extra_state,
                     standard_extra_covariance,
                 )
                 if cfg.enable_cluster and cfg.cluster_mode == "uav_prior":
                     uav_kf_cluster = initialize_uav_filter(
-                        uav_trajectory_dfpc,
+                        local_trajectory_prediction,
                         cfg,
                         cfg.Ts,
+                        state.W_global,
+                        state.W_global_gpu,
                         cluster_uav_prior_state,
                         cluster_uav_prior_covariance,
                     )
@@ -395,18 +402,16 @@ def run_single_trial(
             elif uav_kf is not None:
                 update_uav_filter(
                     uav_kf,
-                    uav_obs_short,
+                    local_trajectory_prediction,
                     state.W_global,
                     state.W_global_gpu,
-                    cfg.uav_obs_noise,
                 )
                 if uav_kf_cluster is not None:
                     update_uav_filter(
                         uav_kf_cluster,
-                        uav_obs_short,
+                        local_trajectory_prediction,
                         state.W_global,
                         state.W_global_gpu,
-                        cfg.uav_obs_noise,
                     )
                 uav_kf_position_updates += 1
 
@@ -418,12 +423,16 @@ def run_single_trial(
             if uav_kf_cluster is not None:
                 cluster_uav_est_kf = uav_kf_cluster.positions
                 cluster_kf_velocity = uav_kf_cluster.velocities
+            kf_pos_error, kf_vel_error, kf_ready = kf_dpc_convergence.update(uav_state)
+            consensus_diagnostics["kf_dpc_position_disagreement_m"][sidx] = kf_pos_error
+            consensus_diagnostics["kf_dpc_velocity_disagreement_mps"][sidx] = kf_vel_error
+            consensus_diagnostics["kf_dpc_phase_ready"][sidx] = kf_ready
 
-            # ---- 3) 短时间尺度节点 KF：predict（dt=Ts）+ 用一份新原始短观测 z_b 更新。
+            # ---- 3) 持久节点 KF：predict（dt=Ts）+ 用本轮同一份节点观测 z_b 更新。
             #     浮标不做跨节点共识，每个节点只使用自己的 KF 状态。
             if sidx > 0:
                 node_kf.predict()
-            z_b_short_kf = buoy_true_short + rng_obs.normal(0.0, cfg.buoy_center_obs_noise, size=(cfg.N, 3))
+            z_b_short_kf = buoy_obs_short
             if sidx > 0:
                 node_kf.update(z_b_short_kf)
             node_state_kf = node_kf.x.copy()
@@ -836,6 +845,7 @@ def run_single_trial(
         "uav_kf_position_updates": uav_kf_position_updates,
         "uav_kf_initialization_step": 0,
         "uav_kf_window_size": 1,
+        "consensus_diagnostics": consensus_diagnostics,
         "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }
@@ -864,6 +874,10 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     cluster_diagnostics = {
         key: mean_stack([res["cluster_diagnostics"][key] for res in trials])
         for key in trials[0]["cluster_diagnostics"]
+    }
+    consensus_diagnostics = {
+        key: mean_stack([res["consensus_diagnostics"][key] for res in trials])
+        for key in trials[0]["consensus_diagnostics"]
     }
     graph_diagnostics = {
         key: float(np.nanmean([res["graph_diagnostics"][key] for res in trials]))
@@ -1010,6 +1024,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "uav_kf_window_size": trials[0]["uav_kf_window_size"],
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
+        "consensus_diagnostics": consensus_diagnostics,
         "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }
