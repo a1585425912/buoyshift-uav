@@ -4,42 +4,21 @@
 sweep 汇总。集中放在这里可以避免不同文件里写出不一致的列名。
 """
 
-# 无算法基线：所有节点不做相位补偿，直接发射。
-METHOD_RANDOM_REFERENCE = "Random Phase Reference"
+# 评估基线，不属于保留的算法分支。
 METHOD_NO_ALG = "No Algorithm"
 
-# 每个节点只使用当前原始位置观测进行开环相位补偿，不做共识或滤波。
-
-# DPC 方法：节点根据估计距离补偿相位。
+# 保留的两个算法：DPC 使用轨迹状态通信更新；KF-DPC 在通信更新前
+# 先用跨时刻的 UAV/浮标后验预测与当前观测完成 Kalman 更新。
 METHOD_DPC = "DPC"
-METHOD_NODE_KF_DPC = "DPC + Node-KF"
-METHOD_KF_DPC = "UAV+Node-KF DPC"
-METHOD_CLUSTER_DPC = "Cluster DPC"
-METHOD_CLUSTER_KF_DPC = "Cluster UAV+Node-KF DPC"
+METHOD_KF_DPC = "KF-DPC"
 
 # Backward-compatible Python identifiers for existing experiment scripts.  New
 # reports and tables use DPC because the algorithm has been renamed.
 METHOD_DFPC = METHOD_DPC
-METHOD_NODE_KF_DFPC = METHOD_NODE_KF_DPC
 METHOD_KF_DFPC = METHOD_KF_DPC
-METHOD_CLUSTER_DFPC = METHOD_CLUSTER_DPC
-METHOD_CLUSTER_KF_DFPC = METHOD_CLUSTER_KF_DPC
 METHODS = [
-    METHOD_RANDOM_REFERENCE,
     METHOD_NO_ALG,
     METHOD_DFPC,
-    METHOD_NODE_KF_DFPC,
-    METHOD_CLUSTER_DFPC,
-    METHOD_KF_DFPC,
-    METHOD_CLUSTER_KF_DFPC,
-]
-
-# Methods retained when cluster trajectory correction is disabled.
-CORE_METHODS = [
-    METHOD_RANDOM_REFERENCE,
-    METHOD_NO_ALG,
-    METHOD_DFPC,
-    METHOD_NODE_KF_DFPC,
     METHOD_KF_DFPC,
 ]
 

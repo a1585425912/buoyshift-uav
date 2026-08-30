@@ -1,8 +1,8 @@
-"""Core state-consensus operations for DPC and KF-DPC.
+"""Core trajectory-consensus operations for DPC and KF-DPC.
 
-The exchanged UAV state is always ``[px, py, pz, vx, vy, vz]``.  Speed and
-flight direction are derived from the Cartesian velocity instead of being
-filtered as independent variables.
+Communication exchanges straight-line parameters ``[b, v, direction]``.
+The current state ``[position, velocity]`` is reconstructed only after the
+communication update; direction remains derived from Cartesian velocity.
 """
 
 from __future__ import annotations
@@ -13,7 +13,12 @@ import numpy as np
 
 from . import backend
 from .kalman import BatchCVKalman3D
-from .trajectory import TrajectoryPrediction
+from .trajectory import (
+    TrajectoryPrediction,
+    normalize_trajectory_directions,
+    trajectory_state_at_time,
+    trajectory_state_from_position_velocity,
+)
 
 
 def _validated_weight_matrix(weight_matrix: np.ndarray, node_count: int) -> np.ndarray:
@@ -58,22 +63,77 @@ def independent_consensus_covariance(
     return 0.5 * (mixed + np.swapaxes(mixed, 1, 2))
 
 
+def consensus_trajectory_parameters(
+    local_parameters: np.ndarray,
+    weight_matrix: np.ndarray,
+    weight_matrix_gpu: object = None,
+) -> np.ndarray:
+    """Communicate complete straight-line trajectory parameters through ``W``."""
+    parameters = np.asarray(local_parameters, dtype=np.float64)
+    if parameters.ndim != 2 or parameters.shape[1] != 9:
+        raise ValueError("trajectory parameters must have shape (N, 9)")
+    _validated_weight_matrix(weight_matrix, parameters.shape[0])
+    fused = backend.consensus_linear_accel(
+        weight_matrix,
+        weight_matrix_gpu,
+        parameters,
+        1,
+    )
+    return normalize_trajectory_directions(fused)
+
+
+def consensus_trajectory_state(
+    local_state: np.ndarray,
+    time_s: float,
+    weight_matrix: np.ndarray,
+    weight_matrix_gpu: object = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert ``[position, velocity]`` to a trajectory, communicate, and predict."""
+    states = np.asarray(local_state, dtype=np.float64)
+    if states.ndim != 2 or states.shape[1] != 6:
+        raise ValueError("local trajectory state must have shape (N, 6)")
+    local_parameters = trajectory_state_from_position_velocity(
+        states[:, :3],
+        states[:, 3:],
+        time_s,
+    )
+    fused_parameters = consensus_trajectory_parameters(
+        local_parameters,
+        weight_matrix,
+        weight_matrix_gpu,
+    )
+    return trajectory_state_at_time(fused_parameters, time_s), fused_parameters
+
+
 def dpc_state_update(
     local_trajectory: TrajectoryPrediction,
+    time_s: float,
     weight_matrix: np.ndarray,
+    weight_matrix_gpu: object = None,
     position_model_std: float = 0.0,
     velocity_model_std: float = 0.0,
 ) -> TrajectoryPrediction:
-    """Apply the DPC communication update to local UAV trajectory estimates."""
+    """Apply DPC consensus to full UAV trajectory parameters ``[b, v]``."""
     local_state = np.asarray(local_trajectory.state, dtype=np.float64)
     if local_state.ndim != 2 or local_state.shape[1] != 6:
         raise ValueError("local trajectory state must have shape (N, 6)")
     weights = _validated_weight_matrix(weight_matrix, local_state.shape[0])
-    state = weights @ local_state
+    if local_trajectory.trajectory_parameters is None:
+        raise ValueError("DPC requires explicit local trajectory parameters")
+    fused_parameters = consensus_trajectory_parameters(
+        local_trajectory.trajectory_parameters,
+        weights,
+        weight_matrix_gpu,
+    )
+    state = trajectory_state_at_time(fused_parameters, time_s)
     covariance = independent_consensus_covariance(weights, local_trajectory.covariance)
     covariance[:, :3, :3] += max(float(position_model_std), 0.0) ** 2 * np.eye(3)
     covariance[:, 3:, 3:] += max(float(velocity_model_std), 0.0) ** 2 * np.eye(3)
-    return TrajectoryPrediction(state=state, covariance=covariance)
+    return TrajectoryPrediction(
+        state=state,
+        covariance=covariance,
+        trajectory_parameters=fused_parameters,
+    )
 
 
 @dataclass(frozen=True)
@@ -83,11 +143,13 @@ class KFDPCStep:
     predicted_state: np.ndarray
     local_posterior_state: np.ndarray
     fused_posterior_state: np.ndarray
+    fused_trajectory_parameters: np.ndarray
 
 
 def kf_dpc_state_update(
     kf: BatchCVKalman3D,
     local_trajectory: TrajectoryPrediction,
+    time_s: float,
     weight_matrix: np.ndarray,
     weight_matrix_gpu: object = None,
 ) -> KFDPCStep:
@@ -106,14 +168,19 @@ def kf_dpc_state_update(
     predicted_state = kf.x.copy()
     kf.update_trajectory_measurement(local_state, local_trajectory.covariance)
     local_posterior_state = kf.x.copy()
-    kf.x = backend.consensus_linear_accel(
+    kf.x, fused_parameters = consensus_trajectory_state(
+        local_posterior_state,
+        time_s,
         weight_matrix,
         weight_matrix_gpu,
-        local_posterior_state,
-        1,
-    ).copy()
+    )
     kf.P = conservative_consensus_covariance(weight_matrix, kf.P)
-    return KFDPCStep(predicted_state, local_posterior_state, kf.x.copy())
+    return KFDPCStep(
+        predicted_state,
+        local_posterior_state,
+        kf.x.copy(),
+        fused_parameters,
+    )
 
 
 @dataclass

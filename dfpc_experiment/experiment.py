@@ -4,7 +4,7 @@
 1. 初始化场景；
 2. 每个长块推进 K 个 Ts 短步并产生观测；
 3. 每个节点用连续观测拟合 UAV 轨迹 [位置,速度] 及协方差；
-4. DPC 对当前轨迹状态做通信更新，KF-DPC 先本地滤波再通信更新；
+4. DPC 对完整轨迹参数 [截距,速度] 做通信更新，KF-DPC 先本地滤波再做轨迹共识；
 5. 多个 Monte Carlo trial 做平均。
 """
 
@@ -15,29 +15,19 @@ from typing import Any
 import numpy as np
 
 from . import backend
-from .cluster import (
-    ClusterTrajectoryLocalizer,
-    cluster_trajectory_consensus,
-    communication_graph_clusters,
-    rotating_cluster_trajectory_correction,
-)
 from .config import ExperimentConfig, validate_config
 from .constants import (
-    CORE_METHODS,
     ERROR_KEYS,
-    METHOD_CLUSTER_DFPC,
-    METHOD_CLUSTER_KF_DFPC,
     METHOD_DFPC,
     METHOD_KF_DFPC,
-    METHOD_NODE_KF_DFPC,
     METHOD_NO_ALG,
-    METHOD_RANDOM_REFERENCE,
     METHODS,
     METRIC_KEYS,
 )
 from .debug_tools import DebugRecorder
 from .dpc import (
     ConsensusTracker,
+    consensus_trajectory_state,
     conservative_consensus_covariance,
     dpc_state_update,
     kf_dpc_state_update,
@@ -59,11 +49,7 @@ from .trajectory import (
     VELOCITY_COLUMNS,
     TrajectoryPrediction,
     init_line_estimator,
-    normalize_trajectory_directions,
-    predict_positions,
     predict_trajectory,
-    trajectory_state_at_time,
-    trajectory_state_from_position_velocity,
     update_local_line_estimates,
 )
 
@@ -75,14 +61,18 @@ def consensus_covariance(W: np.ndarray, P: np.ndarray) -> np.ndarray:
 
 def dpc_trajectory_prediction(
     local_prediction: TrajectoryPrediction,
+    time_s: float,
     weight_matrix: np.ndarray,
+    weight_matrix_gpu: object,
     position_model_std: float,
     velocity_model_std: float,
 ) -> TrajectoryPrediction:
-    """Build the current DPC UAV state after the communication update."""
+    """Reach consensus on full UAV trajectories, then predict the current state."""
     return dpc_state_update(
         local_prediction,
+        time_s,
         weight_matrix,
+        weight_matrix_gpu,
         position_model_std,
         velocity_model_std,
     )
@@ -92,10 +82,9 @@ def initialize_uav_filter(
     trajectory: TrajectoryPrediction,
     cfg: ExperimentConfig,
     update_interval_s: float,
+    time_s: float,
     weight_matrix: np.ndarray,
     weight_matrix_gpu: object,
-    extra_trajectory_state: np.ndarray | None = None,
-    extra_trajectory_covariance: np.ndarray | None = None,
 ) -> BatchCVKalman3D:
     """Initialize local UAV posteriors, then perform the first W update."""
     kf = make_cv3d_filter(
@@ -116,20 +105,12 @@ def initialize_uav_filter(
     kf.P[:, 3:, :3] = 0.0
     kf.P[:, 3:, 3:] = velocity_var * np.eye(3)[None, :, :]
 
-    if extra_trajectory_state is not None:
-        if extra_trajectory_covariance is None:
-            raise ValueError("extra trajectory covariance is required")
-        kf.update_trajectory_measurement(
-            extra_trajectory_state,
-            extra_trajectory_covariance,
-        )
-
-    kf.x = backend.consensus_linear_accel(
+    kf.x, _ = consensus_trajectory_state(
+        kf.x,
+        time_s,
         weight_matrix,
         weight_matrix_gpu,
-        kf.x,
-        1,
-    ).copy()
+    )
     kf.P = consensus_covariance(weight_matrix, kf.P)
 
     return kf
@@ -138,11 +119,12 @@ def initialize_uav_filter(
 def update_uav_filter(
     kf: BatchCVKalman3D,
     local_trajectory: TrajectoryPrediction,
+    time_s: float,
     weight_matrix: np.ndarray,
     weight_matrix_gpu: object,
 ) -> None:
     """Advance from k-1, update locally at k, then fuse posterior states."""
-    kf_dpc_state_update(kf, local_trajectory, weight_matrix, weight_matrix_gpu)
+    kf_dpc_state_update(kf, local_trajectory, time_s, weight_matrix, weight_matrix_gpu)
 
 
 def run_single_trial(
@@ -158,10 +140,6 @@ def run_single_trial(
     """
     rng_scene = np.random.default_rng(seed)
     rng_obs = np.random.default_rng(seed + 3000003)
-    rng_cluster_partition = np.random.default_rng(seed + 4000003)
-    # Keep graph-partition traversal from shifting the relative-measurement
-    # noise stream when connectivity changes.
-    rng_cluster_measurement = np.random.default_rng(seed + 5000003)
 
     fc_hz = float(cfg.fc_mhz) * 1e6
     lam = 3e8 / fc_hz
@@ -171,25 +149,11 @@ def run_single_trial(
     block_duration_s = float(cfg.K) * float(cfg.Ts)
 
     state = init_scene(cfg, rng_scene)
-    methods = METHODS if cfg.enable_cluster else CORE_METHODS
-    cluster_labels = (
-        communication_graph_clusters(
-            state.W_global,
-            cfg.n_clusters,
-            rng_cluster_partition,
-        )
-        if cfg.enable_cluster
-        else None
-    )
+    methods = METHODS
     adjacency = state.W_global > 1e-12
     np.fill_diagonal(adjacency, False)
-    cluster_sizes = (
-        np.bincount(cluster_labels) if cluster_labels is not None else np.array([], dtype=np.int64)
-    )
     graph_diagnostics = {
         "mean_degree": float(np.mean(np.sum(adjacency, axis=1))),
-        "cluster_count": float(cluster_sizes.size),
-        "mean_cluster_size": float(np.mean(cluster_sizes)) if cluster_sizes.size else np.nan,
     }
     # System/calibration phase error is persistent over one trial.  Drawing a
     # new independent value at every short step creates non-physical power
@@ -207,7 +171,6 @@ def run_single_trial(
         dtype=np.float64,
     )
     uav_kf: BatchCVKalman3D | None = None
-    uav_kf_cluster: BatchCVKalman3D | None = None
     uav_kf_trajectory_initializations = 0
     uav_kf_position_updates = 0
     # UAV trajectory statistics retain the complete history.  K belongs to the
@@ -224,19 +187,9 @@ def run_single_trial(
         cfg.dpc_consensus_hold_steps,
     )
     node_kf: BatchCVKalman3D | None = None
-    node_kf_prior: BatchCVKalman3D | None = None
-    cluster_localizer = (
-        ClusterTrajectoryLocalizer(cfg.N)
-        if cfg.enable_cluster and cfg.cluster_mode in {"subgraph", "localization", "node_prior"}
-        else None
-    )
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
-    }
-    cluster_diagnostics = {
-        "effective_peer_count_mean": np.full(total_steps, np.nan, dtype=np.float64),
-        "nodes_with_subgraph_peers": np.zeros(total_steps, dtype=np.int64),
     }
     consensus_diagnostics = {
         "dpc_position_disagreement_m": np.zeros(total_steps, dtype=np.float64),
@@ -247,7 +200,7 @@ def run_single_trial(
         "kf_dpc_phase_ready": np.zeros(total_steps, dtype=bool),
     }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
-        metrics[METHOD_RANDOM_REFERENCE][key].fill(np.nan)
+        metrics[METHOD_NO_ALG][key].fill(np.nan)
 
     for block in range(cfg.T_long):
         # 长块只用于输出分段；轨迹窗口跨块连续滑动，不在边界重置。
@@ -286,18 +239,6 @@ def run_single_trial(
             # 不对不同浮标的绝对位置做共识平均。
             node_state_kf = node_kf.x.copy()
 
-            if cfg.enable_cluster and cfg.cluster_mode == "node_prior":
-                node_kf_prior = make_cv3d_filter(
-                    buoy_obs_short,
-                    cfg.Ts,
-                    cfg.buoy_center_obs_noise,
-                    cfg.buoy_kf_accel_std,
-                    cfg.buoy_kf_initial_velocity_std,
-                    initial_velocity_xyz=state.buoy_wave_mean_velocity,
-                    velocity_propagate=True,
-                )
-                node_state_kf_prior = node_kf_prior.x.copy()
-
         for iteration in range(iter_count):
             sidx = block * iter_count + iteration
             if iteration > 0:
@@ -315,50 +256,20 @@ def run_single_trial(
                 )
 
             # 解除“block 内真值固定”：除 iteration 0 外，每个短步都推进一个 Ts 后重新观测。
-            # ---- 1) DPC：各节点先从连续观测估计当前 [位置,速度]，再用 W 更新状态。
-            cluster_uav_prior_state = None
-            cluster_uav_prior_covariance = None
-            needs_cluster_uav_initialization = (
-                (uav_kf is None and cfg.uav_kf_prior_mode == "dpc_plus_cluster")
-                or (uav_kf_cluster is None and cfg.cluster_mode == "uav_prior")
-            )
-            if cfg.enable_cluster and needs_cluster_uav_initialization:
-                cluster_prior_line_params = cluster_trajectory_consensus(
-                    local_line_params,
-                    state.W_global,
-                    cluster_labels,
-                    consensus_steps=cfg.cluster_localization_iterations,
-                    noise_std=cfg.cluster_trajectory_noise_std,
-                    rng=rng_cluster_measurement,
-                )
-                cluster_prior_line_params = normalize_trajectory_directions(
-                    cluster_prior_line_params
-                )
-                cluster_uav_prior_state = trajectory_state_at_time(
-                    cluster_prior_line_params,
-                    time_s,
-                )
-                cluster_uav_prior_covariance = local_trajectory_prediction.covariance.copy()
-                cluster_uav_prior_covariance[:, :3, :3] += (
-                    max(float(cfg.cluster_uav_prior_noise_std), 0.0) ** 2
-                    * np.eye(3)[None, :, :]
-                )
-                cluster_uav_prior_covariance[:, 3:, 3:] += (
-                    max(float(cfg.cluster_trajectory_noise_std), 0.0) ** 2
-                    * np.eye(3)[None, :, :]
-                )
+            # ---- 1) DPC：各节点先从连续观测估计 [轨迹截距,速度]，
+            #          再用 W 更新整条轨迹，最后预测当前位置。
             uav_trajectory_dfpc = dpc_trajectory_prediction(
                 local_trajectory_prediction,
+                time_s,
                 state.W_global,
+                state.W_global_gpu,
                 cfg.uav_dpc_prior_noise_std,
                 cfg.uav_kf_accel_std * cfg.Ts,
             )
             uav_est_dfpc = uav_trajectory_dfpc.positions
-            line_params_dfpc = trajectory_state_from_position_velocity(
-                uav_est_dfpc,
-                uav_trajectory_dfpc.velocities,
-                time_s,
-            )
+            if uav_trajectory_dfpc.trajectory_parameters is None:
+                raise RuntimeError("DPC trajectory consensus did not return parameters")
+            line_params_dfpc = uav_trajectory_dfpc.trajectory_parameters
             dpc_pos_error, dpc_vel_error, dpc_ready = dpc_convergence.update(
                 uav_trajectory_dfpc.state
             )
@@ -369,60 +280,28 @@ def run_single_trial(
             # ---- 2) 持久 UAV KF：k=0 初始化；k>=1 由 k-1 后验预测，
             #          使用本地轨迹观测更新，最后才通过 W 融合 UAV 后验。
             if uav_kf is None:
-                standard_extra_state = (
-                    cluster_uav_prior_state
-                    if cfg.uav_kf_prior_mode == "dpc_plus_cluster"
-                    else None
-                )
-                standard_extra_covariance = (
-                    cluster_uav_prior_covariance
-                    if standard_extra_state is not None
-                    else None
-                )
                 uav_kf = initialize_uav_filter(
                     local_trajectory_prediction,
                     cfg,
                     cfg.Ts,
+                    time_s,
                     state.W_global,
                     state.W_global_gpu,
-                    standard_extra_state,
-                    standard_extra_covariance,
                 )
-                if cfg.enable_cluster and cfg.cluster_mode == "uav_prior":
-                    uav_kf_cluster = initialize_uav_filter(
-                        local_trajectory_prediction,
-                        cfg,
-                        cfg.Ts,
-                        state.W_global,
-                        state.W_global_gpu,
-                        cluster_uav_prior_state,
-                        cluster_uav_prior_covariance,
-                    )
                 uav_kf_trajectory_initializations += 1
             elif uav_kf is not None:
                 update_uav_filter(
                     uav_kf,
                     local_trajectory_prediction,
+                    time_s,
                     state.W_global,
                     state.W_global_gpu,
                 )
-                if uav_kf_cluster is not None:
-                    update_uav_filter(
-                        uav_kf_cluster,
-                        local_trajectory_prediction,
-                        state.W_global,
-                        state.W_global_gpu,
-                    )
                 uav_kf_position_updates += 1
 
             uav_state = uav_trajectory_dfpc.state if uav_kf is None else uav_kf.x
             uav_est_kf = uav_state[:, :3]
             kf_velocity = uav_state[:, 3:]
-            cluster_uav_est_kf = uav_est_kf
-            cluster_kf_velocity = kf_velocity
-            if uav_kf_cluster is not None:
-                cluster_uav_est_kf = uav_kf_cluster.positions
-                cluster_kf_velocity = uav_kf_cluster.velocities
             kf_pos_error, kf_vel_error, kf_ready = kf_dpc_convergence.update(uav_state)
             consensus_diagnostics["kf_dpc_position_disagreement_m"][sidx] = kf_pos_error
             consensus_diagnostics["kf_dpc_velocity_disagreement_mps"][sidx] = kf_vel_error
@@ -437,37 +316,14 @@ def run_single_trial(
                 node_kf.update(z_b_short_kf)
             node_state_kf = node_kf.x.copy()
             node_est_kf = node_state_kf[:, :3]
-            if node_kf_prior is not None:
-                if sidx > 0:
-                    node_kf_prior.predict()
-                if sidx > 0:
-                    node_kf_prior.update(z_b_short_kf)
-                node_state_kf_prior = node_kf_prior.x.copy()
-                assert cluster_localizer is not None
-                cluster_node_consensus = cluster_localizer.update(
-                    node_state_kf_prior,
-                    state.W_global,
-                    cluster_labels,
-                    buoy_true_short,
-                    rng_cluster_measurement,
-                    relative_noise_std=cfg.cluster_relative_noise_std,
-                    constraint_type=cfg.cluster_constraint_type,
-                    consensus_steps=cfg.cluster_localization_iterations,
-                    dt=cfg.Ts,
-                    blend_with_own=False,
-                )
-                node_kf_prior.update_position_measurement(
-                    cluster_node_consensus[:, :3],
-                    cfg.cluster_node_prior_noise_std,
-                )
-                node_state_kf_prior = node_kf_prior.x.copy()
 
             # 2. 当前真值下的几何量、相位噪声、无算法基线（每个短步真值都变，必须重算）。
             phi_true, amp, p_ideal, p_single_mean, p_single_best = geometry_terms(
                 cfg, p_u_true, buoy_true_short, k_const
             )
             eps = eps_trial
-            random_reference_result = random_phase_reference_metrics(
+            # 无算法组：保留纯随机相位发射，不使用位置观测、共识或滤波。
+            no_alg_result = random_phase_reference_metrics(
                 phi_true,
                 amp,
                 eps,
@@ -475,24 +331,6 @@ def run_single_trial(
                 p_single_mean,
                 p_single_best,
             )
-
-            # 开环原始观测基线：每个节点仅使用自己当前的 UAV/节点位置
-            # 观测形成相位命令，不做节点间共识，也不做滤波。
-            no_alg_result = evaluate_dfpc(
-                uav_obs_short,
-                buoy_obs_short,
-                p_u_true,
-                buoy_true_short,
-                phi_true,
-                amp,
-                eps,
-                k_const,
-                p_ideal,
-                p_single_mean,
-                p_single_best,
-            )
-            no_alg_result["uav_line_intercept_rmse"] = np.nan
-            no_alg_result["uav_velocity_rmse"] = np.nan
 
             kf_intercept_xy = uav_est_kf[:, :2] - time_s * kf_velocity[:, :2]
             kf_line_params = np.column_stack(
@@ -522,23 +360,6 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum(velocity_error**2, axis=1)))
             )
 
-            # Ablation: DPC UAV estimate plus Node-KF, without clustering.
-            node_kf_dfpc_result = evaluate_dfpc(
-                uav_est_dfpc,
-                node_est_kf,
-                p_u_true,
-                buoy_true_short,
-                phi_true,
-                amp,
-                eps,
-                k_const,
-                p_ideal,
-                p_single_mean,
-                p_single_best,
-            )
-            node_kf_dfpc_result["uav_line_intercept_rmse"] = dfpc_result["uav_line_intercept_rmse"]
-            node_kf_dfpc_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
-
             # KF 方法指标：UAV 使用窗口级后验/外推，浮标使用短步节点 KF 后验。
             kf_result = evaluate_dfpc(
                 uav_est_kf,
@@ -560,235 +381,11 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum((kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
             )
 
-            # ---- 4) Cluster 环节。默认按通信图划分子图，每个节点只接受
-            #      同一子图内、与其直接相连的邻居给出的相对定位结果；无邻居
-            #      时保留自身 KF。子图定位结果随后进入 DPC/KF-DPC 相位补偿。
-            #      --cluster_mode=localization/trajectory 保留旧兼容路径。
-            if cfg.enable_cluster:
-                if cfg.cluster_mode in {"subgraph", "localization"}:
-                    assert cluster_localizer is not None
-                    localize_nodes = (
-                        cluster_localizer.update_subgraph
-                        if cfg.cluster_mode == "subgraph"
-                        else cluster_localizer.update
-                    )
-                    localization_options = {
-                        "relative_noise_std": cfg.cluster_relative_noise_std,
-                        "constraint_type": cfg.cluster_constraint_type,
-                        "consensus_steps": cfg.cluster_localization_iterations,
-                        "dt": cfg.Ts,
-                    }
-                    if cfg.cluster_mode == "localization":
-                        localization_options["alpha"] = cfg.cluster_alpha
-                    cluster_node_state = localize_nodes(
-                        node_state_kf,
-                        state.W_global,
-                        cluster_labels,
-                        buoy_true_short,
-                        rng_cluster_measurement,
-                        **localization_options,
-                    )
-                    valid_cluster_nodes = cluster_localizer.last_effective_peer_count > 0.0
-                    if np.any(valid_cluster_nodes):
-                        cluster_diagnostics["effective_peer_count_mean"][sidx] = float(
-                            np.mean(cluster_localizer.last_effective_peer_count[valid_cluster_nodes])
-                        )
-                    cluster_diagnostics["nodes_with_subgraph_peers"][sidx] = int(
-                        np.count_nonzero(valid_cluster_nodes)
-                    )
-                    cluster_node_est = cluster_node_state[:, :3]
-                    cluster_uav_est_dfpc = uav_est_dfpc
-                    cluster_dfpc_result = evaluate_dfpc(
-                        cluster_uav_est_dfpc,
-                        cluster_node_est,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_dfpc_result["uav_line_intercept_rmse"] = dfpc_result["uav_line_intercept_rmse"]
-                    cluster_dfpc_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
-
-                    cluster_uav_est_kf = uav_est_kf
-                    cluster_kf_velocity = kf_velocity
-                    cluster_kf_result = evaluate_dfpc(
-                        cluster_uav_est_kf,
-                        cluster_node_est,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_kf_intercept_xy = (
-                        cluster_uav_est_kf[:, :2] - time_s * cluster_kf_velocity[:, :2]
-                    )
-                    cluster_kf_result["uav_line_intercept_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_intercept_xy - true_line_params[[0, 2]]) ** 2, axis=1)))
-                    )
-                    cluster_kf_result["uav_velocity_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
-                    )
-                elif cfg.cluster_mode == "uav_prior":
-                    cluster_node_est = node_est_kf
-                    cluster_uav_est_dfpc = uav_est_dfpc
-                    cluster_dfpc_result = dict(dfpc_result)
-                    cluster_kf_result = evaluate_dfpc(
-                        cluster_uav_est_kf,
-                        node_est_kf,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_kf_intercept_xy = (
-                        cluster_uav_est_kf[:, :2] - time_s * cluster_kf_velocity[:, :2]
-                    )
-                    cluster_kf_result["uav_line_intercept_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_intercept_xy - true_line_params[[0, 2]]) ** 2, axis=1)))
-                    )
-                    cluster_kf_result["uav_velocity_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
-                    )
-                elif cfg.cluster_mode == "node_prior":
-                    assert node_kf_prior is not None
-                    cluster_node_est = node_kf_prior.x[:, :3]
-                    cluster_uav_est_dfpc = uav_est_dfpc
-                    cluster_dfpc_result = evaluate_dfpc(
-                        cluster_uav_est_dfpc,
-                        cluster_node_est,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_dfpc_result["uav_line_intercept_rmse"] = dfpc_result["uav_line_intercept_rmse"]
-                    cluster_dfpc_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
-                    cluster_uav_est_kf = uav_est_kf
-                    cluster_kf_velocity = kf_velocity
-                    cluster_kf_result = evaluate_dfpc(
-                        cluster_uav_est_kf,
-                        cluster_node_est,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_kf_intercept_xy = (
-                        cluster_uav_est_kf[:, :2] - time_s * cluster_kf_velocity[:, :2]
-                    )
-                    cluster_kf_result["uav_line_intercept_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_intercept_xy - true_line_params[[0, 2]]) ** 2, axis=1)))
-                    )
-                    cluster_kf_result["uav_velocity_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
-                    )
-                else:
-                    cluster_line_params = rotating_cluster_trajectory_correction(
-                        line_params_dfpc,
-                        cluster_labels,
-                        rng_cluster_measurement,
-                        cfg.cluster_alpha,
-                        cfg.cluster_trajectory_noise_std,
-                    )
-                    cluster_line_params = normalize_trajectory_directions(cluster_line_params)
-                    cluster_uav_est_dfpc = predict_positions(cluster_line_params, time_s, cfg.uav_height)
-                    cluster_dfpc_result = evaluate_dfpc(
-                        cluster_uav_est_dfpc,
-                        buoy_obs_short,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_intercept_error = (
-                        cluster_line_params[:, INTERCEPT_COLUMNS] - true_line_params[INTERCEPT_COLUMNS]
-                    )
-                    cluster_velocity_error = (
-                        cluster_line_params[:, VELOCITY_COLUMNS] - true_line_params[VELOCITY_COLUMNS]
-                    )
-                    cluster_dfpc_result["uav_line_intercept_rmse"] = float(
-                        np.sqrt(np.mean(np.sum(cluster_intercept_error**2, axis=1)))
-                    )
-                    cluster_dfpc_result["uav_velocity_rmse"] = float(
-                        np.sqrt(np.mean(np.sum(cluster_velocity_error**2, axis=1)))
-                    )
-
-                    cluster_kf_line_params = trajectory_state_from_position_velocity(
-                        uav_est_kf,
-                        kf_velocity,
-                        time_s,
-                    )
-                    cluster_kf_line_params = rotating_cluster_trajectory_correction(
-                        cluster_kf_line_params,
-                        cluster_labels,
-                        rng_cluster_measurement,
-                        cfg.cluster_alpha,
-                        cfg.cluster_trajectory_noise_std,
-                    )
-                    cluster_kf_line_params = normalize_trajectory_directions(cluster_kf_line_params)
-                    cluster_uav_est_kf = predict_positions(cluster_kf_line_params, time_s, cfg.uav_height)
-                    cluster_kf_velocity = cluster_kf_line_params[:, VELOCITY_COLUMNS]
-                    cluster_kf_result = evaluate_dfpc(
-                        cluster_uav_est_kf,
-                        node_est_kf,
-                        p_u_true,
-                        buoy_true_short,
-                        phi_true,
-                        amp,
-                        eps,
-                        k_const,
-                        p_ideal,
-                        p_single_mean,
-                        p_single_best,
-                    )
-                    cluster_kf_intercept_xy = cluster_uav_est_kf[:, :2] - time_s * cluster_kf_velocity[:, :2]
-                    cluster_kf_result["uav_line_intercept_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_intercept_xy - true_line_params[[0, 2]]) ** 2, axis=1)))
-                    )
-                    cluster_kf_result["uav_velocity_rmse"] = float(
-                        np.sqrt(np.mean(np.sum((cluster_kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
-                    )
-
             results = {
-                METHOD_RANDOM_REFERENCE: random_reference_result,
                 METHOD_NO_ALG: no_alg_result,
                 METHOD_DFPC: dfpc_result,
-                METHOD_NODE_KF_DFPC: node_kf_dfpc_result,
                 METHOD_KF_DFPC: kf_result,
             }
-            if cfg.enable_cluster:
-                results[METHOD_CLUSTER_DFPC] = cluster_dfpc_result
-                results[METHOD_CLUSTER_KF_DFPC] = cluster_kf_result
             for method, result in results.items():
                 for key, val in result.items():
                     metrics[method][key][sidx] = val
@@ -846,7 +443,6 @@ def run_single_trial(
         "uav_kf_initialization_step": 0,
         "uav_kf_window_size": 1,
         "consensus_diagnostics": consensus_diagnostics,
-        "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }
 
@@ -858,7 +454,7 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     device = backend.resolve_device(cfg)
     print(f"Global consensus device: {device}", flush=True)
     debug = DebugRecorder.from_config(cfg)
-    methods = METHODS if cfg.enable_cluster else CORE_METHODS
+    methods = METHODS
 
     trials = []
     for trial in range(mc_trials):
@@ -870,10 +466,6 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
-    }
-    cluster_diagnostics = {
-        key: mean_stack([res["cluster_diagnostics"][key] for res in trials])
-        for key in trials[0]["cluster_diagnostics"]
     }
     consensus_diagnostics = {
         key: mean_stack([res["consensus_diagnostics"][key] for res in trials])
@@ -1025,6 +617,5 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
         "trial_summary_rows": trial_summary_rows,
         "trial_block_rows": trial_block_rows,
         "consensus_diagnostics": consensus_diagnostics,
-        "cluster_diagnostics": cluster_diagnostics,
         "graph_diagnostics": graph_diagnostics,
     }

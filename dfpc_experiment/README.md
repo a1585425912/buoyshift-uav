@@ -42,8 +42,8 @@ and covariances. Node states are distinct physical targets and are therefore
 not averaged across buoys. Trajectory statistics and both KF states retain
 history across long-block boundaries. Convergence is simultaneous network
 agreement in UAV position and velocity, not state change between time steps.
-Outputs compare the no-algorithm baseline, ordinary DPC, clustered DPC,
-UAV+node Kalman DPC, and its clustered position-correction variant.
+Outputs compare the pure-random `No Algorithm` baseline with the two retained
+algorithms: DPC and KF-DPC.
 
 ## Run with debug snapshots
 

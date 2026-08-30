@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from dfpc_experiment.config import ExperimentConfig
-from dfpc_experiment.constants import METHOD_DFPC, METHOD_KF_DFPC
+from dfpc_experiment.constants import METHOD_DFPC, METHOD_KF_DFPC, METHOD_NO_ALG
 from dfpc_experiment.experiment import consensus_covariance, run_experiment
 from dfpc_experiment.kalman import make_cv3d_filter
 from dfpc_experiment.scenario import current_truth, init_scene, observe_positions
@@ -144,21 +144,23 @@ class Kalman3DTests(unittest.TestCase):
             cfg.uav_speed,
         )
 
-    def test_subgraph_mode_and_diagnostics_are_exposed_end_to_end(self) -> None:
+    def test_only_dpc_and_kf_dpc_are_exposed_as_algorithms(self) -> None:
         cfg = ExperimentConfig(
             N=40,
-            n_clusters=4,
             T_long=2,
             K=2,
             mc_trials=1,
             device="cpu",
-            cluster_mode="subgraph",
         )
         result = run_experiment(cfg)
-        diagnostics = result["cluster_diagnostics"]
-        self.assertEqual(result["args"]["cluster_mode"], "subgraph")
-        self.assertTrue(np.all(diagnostics["effective_peer_count_mean"] >= 1.0))
-        self.assertTrue(np.all(diagnostics["nodes_with_subgraph_peers"] > 0))
+        self.assertEqual(set(result["metrics"]), set(result["methods"]))
+        self.assertEqual(
+            set(result["methods"]),
+            {METHOD_NO_ALG, METHOD_DFPC, METHOD_KF_DFPC},
+        )
+        self.assertTrue(np.all(np.isnan(result["metrics"][METHOD_NO_ALG]["uav_rmse"])))
+        self.assertNotIn("cluster_diagnostics", result)
+        self.assertFalse(any("Cluster" in method or "Subgraph" in method for method in result["methods"]))
 
 
 if __name__ == "__main__":

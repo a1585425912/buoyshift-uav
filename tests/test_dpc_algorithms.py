@@ -14,11 +14,16 @@ from dfpc_experiment.dpc import (
     velocity_directions,
 )
 from dfpc_experiment.kalman import make_cv3d_filter
-from dfpc_experiment.trajectory import TrajectoryPrediction
+from dfpc_experiment.trajectory import (
+    TrajectoryPrediction,
+    normalize_trajectory_directions,
+    trajectory_state_from_position_velocity,
+)
 
 
 class DPCAlgorithmTests(unittest.TestCase):
-    def test_dpc_exchanges_position_and_velocity_state_through_w(self) -> None:
+    def test_dpc_exchanges_full_trajectory_parameters_through_w(self) -> None:
+        time_s = 2.0
         states = np.array(
             [
                 [0.0, 1.0, 120.0, 2.0, 0.0, 0.0],
@@ -26,12 +31,17 @@ class DPCAlgorithmTests(unittest.TestCase):
             ]
         )
         covariance = np.stack([np.eye(6), 4.0 * np.eye(6)])
-        local = TrajectoryPrediction(states, covariance)
+        parameters = trajectory_state_from_position_velocity(
+            states[:, :3], states[:, 3:], time_s
+        )
+        local = TrajectoryPrediction(states, covariance, parameters)
         weights = np.array([[0.75, 0.25], [0.5, 0.5]])
 
-        fused = dpc_state_update(local, weights)
+        fused = dpc_state_update(local, time_s, weights)
 
         np.testing.assert_allclose(fused.state, weights @ states)
+        expected_parameters = normalize_trajectory_directions(weights @ parameters)
+        np.testing.assert_allclose(fused.trajectory_parameters, expected_parameters)
         expected_covariance = np.einsum("ij,jkl->ikl", weights**2, covariance)
         np.testing.assert_allclose(fused.covariance, expected_covariance)
         np.testing.assert_allclose(
@@ -64,12 +74,17 @@ class DPCAlgorithmTests(unittest.TestCase):
         local_posterior = manual.x.copy()
         expected_fused = weights @ local_posterior
 
-        step = kf_dpc_state_update(kf, observation, weights)
+        step = kf_dpc_state_update(kf, observation, 0.5, weights)
 
         np.testing.assert_allclose(step.predicted_state, predicted)
         np.testing.assert_allclose(step.local_posterior_state, local_posterior)
         np.testing.assert_allclose(step.fused_posterior_state, expected_fused)
         np.testing.assert_allclose(kf.x, expected_fused)
+        expected_parameters = trajectory_state_from_position_velocity(
+            local_posterior[:, :3], local_posterior[:, 3:], 0.5
+        )
+        expected_parameters = normalize_trajectory_directions(weights @ expected_parameters)
+        np.testing.assert_allclose(step.fused_trajectory_parameters, expected_parameters)
 
     def test_convergence_means_network_agreement_for_consecutive_rounds(self) -> None:
         tracker = ConsensusTracker(0.2, 0.1, hold_steps=2)

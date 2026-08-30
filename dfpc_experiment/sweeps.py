@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -21,13 +20,9 @@ import numpy as np
 
 from .config import ExperimentConfig
 from .constants import (
-    METHOD_CLUSTER_DFPC,
-    METHOD_CLUSTER_KF_DFPC,
     METHOD_DFPC,
     METHOD_KF_DFPC,
-    METHOD_NODE_KF_DFPC,
     METHOD_NO_ALG,
-    METHOD_RANDOM_REFERENCE,
 )
 from .experiment import run_experiment
 from .io_utils import write_rows
@@ -35,10 +30,7 @@ from .io_utils import write_rows
 
 PERFORMANCE_METHODS = [
     (METHOD_DFPC, "dfpc"),
-    (METHOD_NODE_KF_DFPC, "node_kf_dfpc"),
     (METHOD_KF_DFPC, "kf_dfpc"),
-    (METHOD_CLUSTER_DFPC, "cluster_dfpc"),
-    (METHOD_CLUSTER_KF_DFPC, "cluster_kf_dfpc"),
 ]
 
 
@@ -55,19 +47,16 @@ def parse_int_list(text: str) -> list[int]:
 def controlled_node_settings(
     node_count: int,
     target_mean_degree: float,
-    target_cluster_size: int,
 ) -> dict[str, int | float]:
-    """Keep expected graph degree and cluster size stable while N changes."""
+    """Keep the expected communication-graph degree stable while N changes."""
     n = int(node_count)
     if n < 4:
         raise ValueError("controlled node-count sweeps require at least 4 nodes")
-    cluster_size = max(int(target_cluster_size), 1)
     random_edge_probability = float(
         np.clip((float(target_mean_degree) - 2.0) / (n - 3.0), 0.0, 1.0)
     )
     return {
         "global_connectivity": random_edge_probability,
-        "n_clusters": max(1, int(ceil(n / cluster_size))),
     }
 
 
@@ -82,20 +71,11 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
     dfpc_tail_gain = float(np.mean(metrics[METHOD_DFPC]["gain_linear"][tail]))
     no_alg_tail_gain = float(np.mean(metrics[METHOD_NO_ALG]["gain_linear"][tail]))
     dfpc_tail_power = float(np.mean(metrics[METHOD_DFPC]["power_linear"][tail]))
-    node_kf_tail_gain = float(np.mean(metrics[METHOD_NODE_KF_DFPC]["gain_linear"][tail]))
-    node_kf_tail_power = float(np.mean(metrics[METHOD_NODE_KF_DFPC]["power_linear"][tail]))
     kf_tail_gain = float(np.mean(metrics[METHOD_KF_DFPC]["gain_linear"][tail]))
     kf_tail_power = float(np.mean(metrics[METHOD_KF_DFPC]["power_linear"][tail]))
     no_alg_tail_power = float(np.mean(metrics[METHOD_NO_ALG]["power_linear"][tail]))
-    reference_tail_gain = float(np.mean(metrics[METHOD_RANDOM_REFERENCE]["gain_linear"][tail]))
-    reference_tail_power = float(np.mean(metrics[METHOD_RANDOM_REFERENCE]["power_linear"][tail]))
     single_mean_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_mean_power_linear"][tail]))
     single_best_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_best_power_linear"][tail]))
-    effective_peers = res["cluster_diagnostics"]["effective_peer_count_mean"][tail]
-    effective_peer_mean = 0.0 if np.all(np.isnan(effective_peers)) else float(np.nanmean(effective_peers))
-    peer_coverage = float(
-        np.mean(res["cluster_diagnostics"]["nodes_with_subgraph_peers"][tail]) / res["args"]["N"]
-    )
     row = {
         "factor": factor,
         "factor_value": value,
@@ -104,11 +84,7 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "wavelength_m": float(res["wavelength_m"]),
         "N": int(res["args"]["N"]),
         "connectivity": float(res["args"]["global_connectivity"]),
-        "n_clusters": int(res["args"]["n_clusters"]),
         "actual_mean_degree": float(res["graph_diagnostics"]["mean_degree"]),
-        "actual_mean_cluster_size": float(res["graph_diagnostics"]["mean_cluster_size"]),
-        "cluster_effective_peer_count_mean": effective_peer_mean,
-        "cluster_peer_coverage_fraction": peer_coverage,
         "uav_position_noise_m": float(res["args"]["uav_obs_noise"]),
         "node_position_noise_m": float(res["args"]["buoy_center_obs_noise"]),
         "mc_trials": int(res["mc_trials"]),
@@ -127,10 +103,6 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "dfpc_tail_gain_over_single_best_db": float(10.0 * np.log10(max(dfpc_tail_power / max(single_best_tail_power, 1e-30), 1e-30))),
         "no_algorithm_tail_phase_std_deg": float(np.nanmean(metrics[METHOD_NO_ALG]["phase_std_deg"][tail])),
         "no_algorithm_tail_phase_rmse_deg": float(np.nanmean(metrics[METHOD_NO_ALG]["phase_rmse_deg"][tail])),
-        "random_reference_tail_power_db": float(10.0 * np.log10(max(reference_tail_gain, 1e-30))),
-        "random_reference_gain_over_single_mean_db": float(10.0 * np.log10(max(reference_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))),
-        "random_reference_tail_phase_std_deg": float(np.nanmean(metrics[METHOD_RANDOM_REFERENCE]["phase_std_deg"][tail])),
-        "random_reference_tail_phase_rmse_deg": float(np.nanmean(metrics[METHOD_RANDOM_REFERENCE]["phase_rmse_deg"][tail])),
         "dfpc_tail_phase_std_deg": float(np.nanmean(metrics[METHOD_DFPC]["phase_std_deg"][tail])),
         "dfpc_tail_phase_rmse_deg": float(np.nanmean(metrics[METHOD_DFPC]["phase_rmse_deg"][tail])),
         "dfpc_tail_distance_rmse_m": float(np.nanmean(metrics[METHOD_DFPC]["distance_rmse"][tail])),
@@ -142,32 +114,6 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "dfpc_final_phase_std_deg": float(metrics[METHOD_DFPC]["phase_std_deg"][-1]),
         "dfpc_final_phase_rmse_deg": float(metrics[METHOD_DFPC]["phase_rmse_deg"][-1]),
         "dfpc_final_distance_rmse_m": float(metrics[METHOD_DFPC]["distance_rmse"][-1]),
-        "node_kf_dfpc_tail_power_db": float(10.0 * np.log10(max(node_kf_tail_gain, 1e-30))),
-        "node_kf_dfpc_gain_over_single_mean_db": float(
-            10.0 * np.log10(max(node_kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))
-        ),
-        "node_kf_dfpc_tail_phase_std_deg": float(
-            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["phase_std_deg"][tail])
-        ),
-        "node_kf_dfpc_tail_phase_rmse_deg": float(
-            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["phase_rmse_deg"][tail])
-        ),
-        "node_kf_dfpc_tail_distance_rmse_m": float(
-            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["distance_rmse"][tail])
-        ),
-        "node_kf_dfpc_tail_node_rmse_m": float(
-            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["node_rmse"][tail])
-        ),
-        "node_kf_dfpc_tail_uav_rmse_m": float(
-            np.nanmean(metrics[METHOD_NODE_KF_DFPC]["uav_rmse"][tail])
-        ),
-        "node_kf_dfpc_final_power_db": float(metrics[METHOD_NODE_KF_DFPC]["norm_db"][-1]),
-        "node_kf_dfpc_final_phase_std_deg": float(
-            metrics[METHOD_NODE_KF_DFPC]["phase_std_deg"][-1]
-        ),
-        "node_kf_dfpc_final_distance_rmse_m": float(
-            metrics[METHOD_NODE_KF_DFPC]["distance_rmse"][-1]
-        ),
         "kf_dfpc_tail_power_db": float(10.0 * np.log10(max(kf_tail_gain, 1e-30))),
         "kf_improvement_over_dfpc_db": float(10.0 * np.log10(max(kf_tail_gain / max(dfpc_tail_gain, 1e-30), 1e-30))),
         "kf_dfpc_gain_over_single_mean_db": float(10.0 * np.log10(max(kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))),
@@ -181,40 +127,6 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "kf_dfpc_final_phase_rmse_deg": float(metrics[METHOD_KF_DFPC]["phase_rmse_deg"][-1]),
         "kf_dfpc_final_distance_rmse_m": float(metrics[METHOD_KF_DFPC]["distance_rmse"][-1]),
     }
-    for method, prefix in PERFORMANCE_METHODS[3:]:
-        method_tail_gain = float(np.mean(metrics[method]["gain_linear"][tail]))
-        method_tail_power = float(np.mean(metrics[method]["power_linear"][tail]))
-        row.update(
-            {
-                f"{prefix}_tail_power_db": float(
-                    10.0 * np.log10(max(method_tail_gain, 1e-30))
-                ),
-                f"{prefix}_gain_over_single_mean_db": float(
-                    10.0
-                    * np.log10(
-                        max(method_tail_power / max(single_mean_tail_power, 1e-30), 1e-30)
-                    )
-                ),
-                f"{prefix}_tail_phase_std_deg": float(
-                    np.nanmean(metrics[method]["phase_std_deg"][tail])
-                ),
-                f"{prefix}_tail_phase_rmse_deg": float(
-                    np.nanmean(metrics[method]["phase_rmse_deg"][tail])
-                ),
-                f"{prefix}_tail_distance_rmse_m": float(
-                    np.nanmean(metrics[method]["distance_rmse"][tail])
-                ),
-                f"{prefix}_tail_node_rmse_m": float(
-                    np.nanmean(metrics[method]["node_rmse"][tail])
-                ),
-                f"{prefix}_tail_uav_rmse_m": float(
-                    np.nanmean(metrics[method]["uav_rmse"][tail])
-                ),
-                f"{prefix}_final_power_db": float(metrics[method]["norm_db"][-1]),
-                f"{prefix}_final_phase_std_deg": float(metrics[method]["phase_std_deg"][-1]),
-                f"{prefix}_final_distance_rmse_m": float(metrics[method]["distance_rmse"][-1]),
-            }
-        )
     return row
 
 
@@ -336,7 +248,6 @@ def run_factor(
     rebound_threshold_db: float = 0.5,
     controlled_design: bool = False,
     target_mean_degree: float = 8.0,
-    target_cluster_size: int = 10,
 ) -> list[dict[str, Any]]:
     """运行一个因素的完整 sweep。"""
     rows = []
@@ -352,13 +263,7 @@ def run_factor(
                 controlled_node_settings(
                     int(value),
                     target_mean_degree,
-                    target_cluster_size,
                 )
-            )
-        elif controlled_design and factor == "connectivity":
-            overrides["n_clusters"] = max(
-                1,
-                int(ceil(point_cfg.N / max(int(target_cluster_size), 1))),
             )
         for key, val in overrides.items():
             setattr(point_cfg, key, val)
@@ -369,7 +274,6 @@ def run_factor(
             {
                 "controlled_design": bool(controlled_design),
                 "target_mean_degree": target_mean_degree if factor == "node_count" else "",
-                "target_cluster_size": target_cluster_size if controlled_design else "",
                 "point_index": idx,
                 "point_out_dir": str(point_dir),
             }
@@ -436,8 +340,6 @@ def detect_frequency_rebounds(
     method_specs = [
         (METHOD_DFPC, "dfpc"),
         (METHOD_KF_DFPC, "kf_dfpc"),
-        (METHOD_CLUSTER_DFPC, "cluster_dfpc"),
-        (METHOD_CLUSTER_KF_DFPC, "cluster_kf_dfpc"),
     ]
     events: list[dict[str, Any]] = []
     for method, prefix in method_specs:
@@ -565,11 +467,9 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
     xs = np.array([float(row["factor_value"]) for row in group], dtype=np.float64)
     specs = [
         ("dfpc_tail_power_db", "DPC normalized power (dB)", f"{factor}_dpc_tail_power_db.png"),
-        ("random_reference_tail_power_db", "Random-reference normalized power (dB)", f"{factor}_random_reference_tail_power_db.png"),
         ("dfpc_tail_gain_over_single_mean_db", "DPC gain over mean single node (dB)", f"{factor}_gain_over_single_mean_db.png"),
         ("dfpc_tail_phase_std_deg", "DPC phase std (deg)", f"{factor}_dpc_phase_std_deg.png"),
         ("dfpc_tail_phase_rmse_deg", "DPC phase RMSE (deg)", f"{factor}_dpc_phase_rmse_deg.png"),
-        ("random_reference_tail_phase_std_deg", "Random-reference phase std (deg)", f"{factor}_random_reference_phase_std_deg.png"),
         ("no_algorithm_tail_phase_rmse_deg", "No-algorithm phase RMSE (deg)", f"{factor}_no_algorithm_phase_rmse_deg.png"),
         ("dfpc_tail_distance_rmse_m", "Distance RMSE (m)", f"{factor}_dfpc_distance_rmse.png"),
         ("dfpc_tail_uav_rmse_m", "UAV RMSE (m)", f"{factor}_dfpc_uav_rmse.png"),
@@ -596,10 +496,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_power_db",
-                "node_kf_dfpc_tail_power_db",
                 "kf_dfpc_tail_power_db",
-                "cluster_dfpc_tail_power_db",
-                "cluster_kf_dfpc_tail_power_db",
             ],
             "Tail normalized power (dB)",
             f"{factor}_all_methods_tail_power_db.png",
@@ -607,10 +504,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_phase_std_deg",
-                "node_kf_dfpc_tail_phase_std_deg",
                 "kf_dfpc_phase_std_deg",
-                "cluster_dfpc_tail_phase_std_deg",
-                "cluster_kf_dfpc_tail_phase_std_deg",
             ],
             "Tail residual phase std (deg)",
             f"{factor}_all_methods_phase_std_deg.png",
@@ -618,10 +512,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_node_rmse_m",
-                "node_kf_dfpc_tail_node_rmse_m",
                 "kf_dfpc_node_rmse_m",
-                "cluster_dfpc_tail_node_rmse_m",
-                "cluster_kf_dfpc_tail_node_rmse_m",
             ],
             "Tail node RMSE (m)",
             f"{factor}_all_methods_node_rmse.png",

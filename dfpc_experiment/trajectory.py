@@ -42,6 +42,7 @@ class TrajectoryPrediction:
 
     state: np.ndarray
     covariance: np.ndarray
+    trajectory_parameters: np.ndarray | None = None
 
     @property
     def positions(self) -> np.ndarray:
@@ -218,6 +219,7 @@ def predict_trajectory(
             measurement_std,
             initial_velocity_std,
         ),
+        trajectory_parameters=np.asarray(trajectory_states, dtype=np.float64).copy(),
     )
 
 

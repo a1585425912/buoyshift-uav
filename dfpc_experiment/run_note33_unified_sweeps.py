@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Reproduce the four Note3.3 sweeps with one consistent metric definition.
 
-This runner intentionally evaluates only the methods used by the document:
+This runner evaluates the retained baseline and DPC method:
 
-* Random Phase Reference: theta=0; no observation, consensus, or filtering.
-* No Algorithm: phase compensation from instantaneous noisy positions.
+* No Algorithm: pure random phase reference with theta=0; no observation,
+  consensus, or filtering.
 * DPC: distributed online UAV line estimation plus one consensus step at
   every short-time sample; raw node-position observations are retained.
 
@@ -50,7 +50,7 @@ from dfpc_experiment.trajectory import (
 )
 
 
-METHODS = ("Random Phase Reference", "No Algorithm", "DPC")
+METHODS = ("No Algorithm", "DPC")
 DEFAULT_VALUES = {
     "node_count": "20,30,50,75,100,150,200,300,500,1000,1500,2000",
     "connectivity": "0.0005,0.001,0.002,0.003,0.005,0.008,0.01,0.02,0.03,0.05,0.08,0.10",
@@ -119,12 +119,8 @@ def run_trial(cfg: ExperimentConfig, seed: int) -> dict[str, dict[str, np.ndarra
                 cfg, p_u_true, buoy_true, k_const
             )
             results = {
-                "Random Phase Reference": random_phase_reference_metrics(
+                "No Algorithm": random_phase_reference_metrics(
                     phi_true, amp, eps_trial, p_ideal, p_single_mean, p_single_best
-                ),
-                "No Algorithm": evaluate_dfpc(
-                    uav_obs, buoy_obs, p_u_true, buoy_true, phi_true, amp,
-                    eps_trial, k_const, p_ideal, p_single_mean, p_single_best,
                 ),
                 "DPC": evaluate_dfpc(
                     uav_dfpc, buoy_obs, p_u_true, buoy_true, phi_true, amp,

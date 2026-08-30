@@ -7,7 +7,12 @@ import numpy as np
 from dfpc_experiment.config import ExperimentConfig
 from dfpc_experiment.constants import METHOD_DPC
 from dfpc_experiment.experiment import run_experiment
-from dfpc_experiment.scenario import advance_truth_one_long_block, advance_truth_one_short_step, init_scene
+from dfpc_experiment.scenario import (
+    advance_truth_one_long_block,
+    advance_truth_one_short_step,
+    geometry_terms,
+    init_scene,
+)
 from dfpc_experiment.trajectory import (
     consensus_independent_covariance,
     init_line_estimator,
@@ -22,6 +27,20 @@ from dfpc_experiment.trajectory import (
 
 
 class MotionModelTests(unittest.TestCase):
+    def test_default_geometry_uses_unit_path_loss(self) -> None:
+        cfg = ExperimentConfig(N=2, tx_power=5.0)
+        _, amp, p_ideal, p_single_mean, p_single_best = geometry_terms(
+            cfg,
+            np.zeros(3),
+            np.array([[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]]),
+            k_const=1.0,
+        )
+        expected_amplitude = np.sqrt(cfg.tx_power)
+        np.testing.assert_allclose(amp, expected_amplitude, atol=1e-12)
+        self.assertAlmostEqual(p_ideal, (2.0 * expected_amplitude) ** 2)
+        self.assertAlmostEqual(p_single_mean, cfg.tx_power)
+        self.assertAlmostEqual(p_single_best, cfg.tx_power)
+
     def test_center_moves_exactly_with_fixed_current(self) -> None:
         cfg = ExperimentConfig(
             N=400,

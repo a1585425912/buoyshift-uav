@@ -247,7 +247,7 @@ UAV+Node-KF DPC filters both UAV and buoy states as `[x,y,z,vx,vy,vz]` and uses 
 The only filtering branch retained is the linear 3-D constant-velocity Kalman filter.
 Power is averaged as linear gain before conversion to dB. Positive power change versus DPC is better.
 Every method uses an ideal 0/pi polarity choice. Effective residual phases are folded modulo pi into [-90, 90) deg; they are not clipped.
-`Random Phase Reference` transmits with theta=0 and uses no observations. `No Algorithm` uses each node's instantaneous noisy UAV/node positions without consensus or filtering.
+`No Algorithm` is the pure-random reference: it transmits with theta=0 and uses no observations, consensus, or filtering.
 
 | method | tail normalized power | power change vs DPC | gain over mean single node | tail phase std | tail phase RMSE | tail node RMSE | tail distance RMSE | tail UAV RMSE | tail UAV velocity RMSE |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
