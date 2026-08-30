@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from dfpc_experiment.dpc import (
-    ConsensusTracker,
+    DistanceRMSEConvergenceTracker,
     dpc_state_update,
     finalize_dpc_output,
     kf_dpc_state_update,
@@ -86,16 +86,16 @@ class DPCAlgorithmTests(unittest.TestCase):
         expected_parameters = normalize_trajectory_directions(weights @ expected_parameters)
         np.testing.assert_allclose(step.fused_trajectory_parameters, expected_parameters)
 
-    def test_convergence_means_network_agreement_for_consecutive_rounds(self) -> None:
-        tracker = ConsensusTracker(0.2, 0.1, hold_steps=2)
-        agreed = np.array(
-            [
-                [10.0, 0.0, 120.0, 4.0, 0.0, 0.0],
-                [10.1, 0.0, 120.0, 4.02, 0.0, 0.0],
-            ]
-        )
-        self.assertFalse(tracker.update(agreed)[2])
-        self.assertTrue(tracker.update(agreed + np.array([4.0, 0.0, 0.0, 0.0, 0.0, 0.0]))[2])
+    def test_convergence_uses_consecutive_distance_rmse_changes(self) -> None:
+        tracker = DistanceRMSEConvergenceTracker(0.05, hold_steps=2)
+        first_change, ready = tracker.update(1.20)
+        self.assertTrue(np.isnan(first_change))
+        self.assertFalse(ready)
+        self.assertFalse(tracker.update(1.17)[1])
+        change, ready = tracker.update(1.13)
+        self.assertAlmostEqual(change, 0.04)
+        self.assertTrue(ready)
+        self.assertTrue(tracker.update(1.30)[1])
         self.assertTrue(tracker.converged)
 
     def test_spatial_phase_uses_input_node_phase_and_estimated_geometry(self) -> None:

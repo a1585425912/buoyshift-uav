@@ -184,29 +184,29 @@ def kf_dpc_state_update(
 
 
 @dataclass
-class ConsensusTracker:
-    """Require spatial state agreement for several consecutive physical rounds."""
+class DistanceRMSEConvergenceTracker:
+    """Require stable distance RMSE for several consecutive physical rounds."""
 
-    position_tolerance_m: float
-    velocity_tolerance_mps: float
+    tolerance_m: float
     hold_steps: int = 3
+    previous_rmse_m: float | None = None
     consecutive_steps: int = 0
     converged: bool = False
 
-    def update(self, uav_states: np.ndarray) -> tuple[float, float, bool]:
-        states = np.asarray(uav_states, dtype=np.float64)
-        if states.ndim != 2 or states.shape[1] != 6:
-            raise ValueError("uav_states must have shape (N, 6)")
-        center = np.mean(states, axis=0)
-        position_error = float(np.max(np.linalg.norm(states[:, :3] - center[:3], axis=1)))
-        velocity_error = float(np.max(np.linalg.norm(states[:, 3:] - center[3:], axis=1)))
-        inside = (
-            position_error <= max(float(self.position_tolerance_m), 0.0)
-            and velocity_error <= max(float(self.velocity_tolerance_mps), 0.0)
+    def update(self, distance_rmse_m: float) -> tuple[float, bool]:
+        current = float(distance_rmse_m)
+        if not np.isfinite(current) or current < 0.0:
+            raise ValueError("distance_rmse_m must be finite and non-negative")
+        change = (
+            np.nan
+            if self.previous_rmse_m is None
+            else abs(current - self.previous_rmse_m)
         )
+        inside = self.previous_rmse_m is not None and change < max(float(self.tolerance_m), 0.0)
+        self.previous_rmse_m = current
         self.consecutive_steps = self.consecutive_steps + 1 if inside else 0
         self.converged = self.converged or self.consecutive_steps >= max(int(self.hold_steps), 1)
-        return position_error, velocity_error, self.converged
+        return float(change), self.converged
 
 
 def velocity_directions(uav_states: np.ndarray) -> np.ndarray:

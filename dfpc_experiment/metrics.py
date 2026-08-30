@@ -109,11 +109,18 @@ def evaluate_dfpc(
 
 
 def mean_stack(arrays: list[np.ndarray]) -> np.ndarray:
-    """对 Monte Carlo trial 的数组求平均，并正确处理全 NaN 情况。"""
+    """对 Monte Carlo trial 的数组求平均，并逐元素处理全 NaN 情况。"""
     stack = np.stack(arrays, axis=0)
-    if np.all(np.isnan(stack)):
-        return np.full(stack.shape[1], np.nan, dtype=np.float64)
-    return np.nanmean(stack, axis=0)
+    valid = ~np.isnan(stack)
+    counts = np.sum(valid, axis=0)
+    means = np.full(stack.shape[1:], np.nan, dtype=np.float64)
+    np.divide(
+        np.nansum(stack, axis=0),
+        counts,
+        out=means,
+        where=counts > 0,
+    )
+    return means
 
 
 def tail_summary(res: dict[str, Any], method: str, tail_ratio: float = 0.8) -> dict[str, float | str]:

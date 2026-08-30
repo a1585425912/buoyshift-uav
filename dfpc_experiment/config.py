@@ -86,10 +86,10 @@ class ExperimentConfig:
     path_loss_alpha: float = 0.0
     global_connectivity: float = 0.03
     uav_consensus_steps: int = 3
-    # Network convergence is spatial agreement among simultaneous UAV state
-    # estimates, not the difference between k and k-1 for a moving UAV.
-    dpc_consensus_position_tol_m: float = 1.0
-    dpc_consensus_velocity_tol_mps: float = 0.2
+    # Convergence uses the absolute change of distance RMSE between physical
+    # steps k and k-1.  It is a simulation-only criterion because d_true is
+    # unavailable to a deployed network.
+    dpc_distance_rmse_delta_tol_m: float = 0.05
     dpc_consensus_hold_steps: int = 3
 
     # -------------------------
@@ -170,14 +170,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--global_connectivity", type=float, default=ExperimentConfig.global_connectivity)
     parser.add_argument("--uav_consensus_steps", type=int, default=ExperimentConfig.uav_consensus_steps)
     parser.add_argument(
-        "--dpc_consensus_position_tol_m",
+        "--dpc_distance_rmse_delta_tol_m",
         type=float,
-        default=ExperimentConfig.dpc_consensus_position_tol_m,
-    )
-    parser.add_argument(
-        "--dpc_consensus_velocity_tol_mps",
-        type=float,
-        default=ExperimentConfig.dpc_consensus_velocity_tol_mps,
+        default=ExperimentConfig.dpc_distance_rmse_delta_tol_m,
     )
     parser.add_argument(
         "--dpc_consensus_hold_steps",
@@ -220,8 +215,7 @@ def validate_config(cfg: ExperimentConfig) -> None:
         "uav_speed": cfg.uav_speed,
         "uav_obs_noise": cfg.uav_obs_noise,
         "uav_dpc_prior_noise_std": cfg.uav_dpc_prior_noise_std,
-        "dpc_consensus_position_tol_m": cfg.dpc_consensus_position_tol_m,
-        "dpc_consensus_velocity_tol_mps": cfg.dpc_consensus_velocity_tol_mps,
+        "dpc_distance_rmse_delta_tol_m": cfg.dpc_distance_rmse_delta_tol_m,
         "buoy_random_displacement_std": cfg.buoy_random_displacement_std,
         "buoy_center_obs_noise": cfg.buoy_center_obs_noise,
         "buoy_wave_speed": cfg.buoy_wave_speed,

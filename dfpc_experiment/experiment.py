@@ -26,7 +26,7 @@ from .constants import (
 )
 from .debug_tools import DebugRecorder
 from .dpc import (
-    ConsensusTracker,
+    DistanceRMSEConvergenceTracker,
     consensus_trajectory_state,
     conservative_consensus_covariance,
     dpc_state_update,
@@ -176,14 +176,12 @@ def run_single_trial(
     # UAV trajectory statistics retain the complete history.  K belongs to the
     # buoy short-time motion/output block and does not reset or gate the UAV KF.
     line_estimator = init_line_estimator(cfg.N)
-    dpc_convergence = ConsensusTracker(
-        cfg.dpc_consensus_position_tol_m,
-        cfg.dpc_consensus_velocity_tol_mps,
+    dpc_convergence = DistanceRMSEConvergenceTracker(
+        cfg.dpc_distance_rmse_delta_tol_m,
         cfg.dpc_consensus_hold_steps,
     )
-    kf_dpc_convergence = ConsensusTracker(
-        cfg.dpc_consensus_position_tol_m,
-        cfg.dpc_consensus_velocity_tol_mps,
+    kf_dpc_convergence = DistanceRMSEConvergenceTracker(
+        cfg.dpc_distance_rmse_delta_tol_m,
         cfg.dpc_consensus_hold_steps,
     )
     node_kf: BatchCVKalman3D | None = None
@@ -192,11 +190,9 @@ def run_single_trial(
         for method in methods
     }
     consensus_diagnostics = {
-        "dpc_position_disagreement_m": np.zeros(total_steps, dtype=np.float64),
-        "dpc_velocity_disagreement_mps": np.zeros(total_steps, dtype=np.float64),
+        "dpc_distance_rmse_delta_m": np.full(total_steps, np.nan, dtype=np.float64),
         "dpc_phase_ready": np.zeros(total_steps, dtype=bool),
-        "kf_dpc_position_disagreement_m": np.zeros(total_steps, dtype=np.float64),
-        "kf_dpc_velocity_disagreement_mps": np.zeros(total_steps, dtype=np.float64),
+        "kf_dpc_distance_rmse_delta_m": np.full(total_steps, np.nan, dtype=np.float64),
         "kf_dpc_phase_ready": np.zeros(total_steps, dtype=bool),
     }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
@@ -270,13 +266,6 @@ def run_single_trial(
             if uav_trajectory_dfpc.trajectory_parameters is None:
                 raise RuntimeError("DPC trajectory consensus did not return parameters")
             line_params_dfpc = uav_trajectory_dfpc.trajectory_parameters
-            dpc_pos_error, dpc_vel_error, dpc_ready = dpc_convergence.update(
-                uav_trajectory_dfpc.state
-            )
-            consensus_diagnostics["dpc_position_disagreement_m"][sidx] = dpc_pos_error
-            consensus_diagnostics["dpc_velocity_disagreement_mps"][sidx] = dpc_vel_error
-            consensus_diagnostics["dpc_phase_ready"][sidx] = dpc_ready
-
             # ---- 2) 持久 UAV KF：k=0 初始化；k>=1 由 k-1 后验预测，
             #          使用本地轨迹观测更新，最后才通过 W 融合 UAV 后验。
             if uav_kf is None:
@@ -302,11 +291,6 @@ def run_single_trial(
             uav_state = uav_trajectory_dfpc.state if uav_kf is None else uav_kf.x
             uav_est_kf = uav_state[:, :3]
             kf_velocity = uav_state[:, 3:]
-            kf_pos_error, kf_vel_error, kf_ready = kf_dpc_convergence.update(uav_state)
-            consensus_diagnostics["kf_dpc_position_disagreement_m"][sidx] = kf_pos_error
-            consensus_diagnostics["kf_dpc_velocity_disagreement_mps"][sidx] = kf_vel_error
-            consensus_diagnostics["kf_dpc_phase_ready"][sidx] = kf_ready
-
             # ---- 3) 持久节点 KF：predict（dt=Ts）+ 用本轮同一份节点观测 z_b 更新。
             #     浮标不做跨节点共识，每个节点只使用自己的 KF 状态。
             if sidx > 0:
@@ -381,6 +365,18 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum((kf_velocity[:, :2] - true_line_params[[1, 3]]) ** 2, axis=1)))
             )
 
+            # 4. 收敛判据：相邻物理时刻的全节点距离误差 RMSE 变化量。
+            # 这里使用仿真真值计算 distance_rmse，因此该判据用于实验评估；真实系统中
+            # 需要用可观测的距离残差或创新统计量替代真值误差。
+            dpc_rmse_delta, dpc_ready = dpc_convergence.update(dfpc_result["distance_rmse"])
+            kf_dpc_rmse_delta, kf_dpc_ready = kf_dpc_convergence.update(
+                kf_result["distance_rmse"]
+            )
+            consensus_diagnostics["dpc_distance_rmse_delta_m"][sidx] = dpc_rmse_delta
+            consensus_diagnostics["dpc_phase_ready"][sidx] = dpc_ready
+            consensus_diagnostics["kf_dpc_distance_rmse_delta_m"][sidx] = kf_dpc_rmse_delta
+            consensus_diagnostics["kf_dpc_phase_ready"][sidx] = kf_dpc_ready
+
             results = {
                 METHOD_NO_ALG: no_alg_result,
                 METHOD_DFPC: dfpc_result,
@@ -391,7 +387,7 @@ def run_single_trial(
                     metrics[method][key][sidx] = val
 
             if debug is not None:
-                # 4. 如果打开 --debug，只保存指定 block/iteration 的细节，避免文件过大。
+                # 5. 如果打开 --debug，只保存指定 block/iteration 的细节，避免文件过大。
                 debug.capture(
                     trial_index=trial_index,
                     seed=seed,
