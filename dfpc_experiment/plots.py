@@ -113,16 +113,16 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
     metrics = res["metrics"]
     methods = res.get("methods") or METHODS
     out_dir.mkdir(parents=True, exist_ok=True)
-    freq_tag = f"{res['frequency_MHz']:.0f}mhz"
+    freq_tag = f"{res['frequency_MHz']:.0f}MHz"
 
-    plot_metric(metrics, cfg, out_dir, "norm_db", r"$10\log_{10}(P_J/P_{ideal})$ (dB)", "dpc_power_db.png")
-    plot_metric(metrics, cfg, out_dir, "gain_over_single_mean_db", r"$10\log_{10}(P_J/P_{single,mean})$ (dB)", "dpc_gain_over_single_mean_db.png")
-    plot_metric(metrics, cfg, out_dir, "gain_over_single_best_db", r"$10\log_{10}(P_J/P_{single,best})$ (dB)", "dpc_gain_over_single_best_db.png")
-    plot_metric(metrics, cfg, out_dir, "phase_std_deg", "residual phase std (deg)", "dpc_phase_std_deg.png")
-    plot_metric(metrics, cfg, out_dir, "phase_rmse_deg", "residual phase RMSE (deg)", "dpc_phase_rmse_deg.png")
-    plot_metric(metrics, cfg, out_dir, "distance_rmse", "distance RMSE (m)", "dpc_distance_rmse.png")
-    plot_metric(metrics, cfg, out_dir, "node_rmse", "node position RMSE (m)", "dpc_node_rmse.png")
-    plot_metric(metrics, cfg, out_dir, "uav_rmse", "UAV position RMSE (m)", "dpc_uav_rmse.png")
+    plot_metric(metrics, cfg, out_dir, "norm_db", r"$10\log_{10}(P_J/P_{ideal})$ (dB)", "基准实验_归一化相干功率_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "gain_over_single_mean_db", r"$10\log_{10}(P_J/P_{single,mean})$ (dB)", "基准实验_相对平均单节点增益_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "gain_over_single_best_db", r"$10\log_{10}(P_J/P_{single,best})$ (dB)", "基准实验_相对最佳单节点增益_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "phase_std_deg", "residual phase std (deg)", "基准实验_残余相位标准差_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "phase_rmse_deg", "residual phase RMSE (deg)", "基准实验_残余相位RMSE_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "distance_rmse", "distance RMSE (m)", "基准实验_距离RMSE_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "node_rmse", "node position RMSE (m)", "基准实验_浮标位置RMSE_迭代曲线.png")
+    plot_metric(metrics, cfg, out_dir, "uav_rmse", "UAV position RMSE (m)", "基准实验_UAV位置RMSE_迭代曲线.png")
     # The line-intercept RMSE remains in CSV/NPZ for diagnosis, but it is not a
     # primary performance curve: b = p - t*v amplifies tiny velocity errors as
     # physical time grows and can look like current-position divergence.
@@ -132,7 +132,7 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
         out_dir,
         "uav_velocity_rmse",
         "UAV velocity RMSE (m/s)",
-        "dpc_uav_velocity_rmse.png",
+        "基准实验_UAV速度RMSE_迭代曲线.png",
         log_y=True,
     )
 
@@ -153,10 +153,10 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
                 val = metrics[method][key][sidx]
                 row[f"{prefix}_{key}"] = "" if np.isnan(val) else float(val)
         rows.append(row)
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_curves.csv", rows)
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_block_final.csv", res["block_final_rows"])
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_trial_summary.csv", res["trial_summary_rows"])
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_trial_block.csv", res["trial_block_rows"])
+    write_rows(out_dir / f"基准实验_{freq_tag}_逐迭代曲线.csv", rows)
+    write_rows(out_dir / f"基准实验_{freq_tag}_长窗口末值.csv", res["block_final_rows"])
+    write_rows(out_dir / f"基准实验_{freq_tag}_MC逐次汇总.csv", res["trial_summary_rows"])
+    write_rows(out_dir / f"基准实验_{freq_tag}_MC分窗口数据.csv", res["trial_block_rows"])
 
     summary_rows = []
     # 后 20% 迭代步的稳态摘要。
@@ -197,7 +197,7 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
             "" if distance == "" or reference_distance == "" else float(distance - reference_distance)
         )
         summary_rows.append(row)
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_summary.csv", summary_rows)
+    write_rows(out_dir / f"基准实验_{freq_tag}_方法汇总.csv", summary_rows)
 
     block_times = (
         np.repeat(np.arange(cfg.T_long, dtype=np.float64) * cfg.K, iter_count)
@@ -213,7 +213,7 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
         prefix = method.lower().replace(" ", "_").replace("-", "_")
         for key, arr in metrics[method].items():
             npz_data[f"{prefix}_{key}"] = arr
-    np.savez(out_dir / f"dual_timescale_dpc_{freq_tag}_data.npz", **npz_data)
+    np.savez(out_dir / f"基准实验_{freq_tag}_原始数组.npz", **npz_data)
 
     table = []
     for row in summary_rows:
@@ -247,7 +247,7 @@ Every method uses an ideal 0/pi polarity choice. Effective residual phases are f
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 {chr(10).join(table)}
 """
-    (out_dir / f"dual_timescale_dpc_{freq_tag}_report.md").write_text(report, encoding="utf-8")
+    (out_dir / f"基准实验_{freq_tag}_结果报告.md").write_text(report, encoding="utf-8")
 
     debug_recorder = res.get("debug_recorder")
     if debug_recorder is not None:

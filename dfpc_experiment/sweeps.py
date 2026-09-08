@@ -33,6 +33,20 @@ PERFORMANCE_METHODS = [
     (METHOD_KF_DFPC, "kf_dfpc"),
 ]
 
+FACTOR_FILE_LABELS = {
+    "node_count": "节点数扫描",
+    "frequency": "载波频率扫描",
+    "connectivity": "连通度扫描",
+    "node_position_noise": "浮标位置误差扫描",
+    "uav_position_error": "UAV位置误差扫描",
+    "wave_speed": "海流速度扫描",
+}
+
+
+def factor_file_label(factor: str) -> str:
+    """Return a readable Chinese filename prefix for a sweep factor."""
+    return FACTOR_FILE_LABELS.get(factor, factor.replace("_", "-"))
+
 
 def parse_float_list(text: str) -> list[float]:
     """把命令行里的逗号分隔浮点数解析成列表。"""
@@ -332,22 +346,23 @@ def run_factor(
                     )
         if point_cfg.debug:
             res["debug_recorder"].write(point_dir)
-    write_rows(out_dir / f"{factor}_summary.csv", rows)
-    write_rows(out_dir / f"{factor}_trial_diagnostics.csv", trial_diagnostics)
-    write_rows(out_dir / f"{factor}_block_trial_diagnostics.csv", block_diagnostics)
+    file_prefix = factor_file_label(factor)
+    write_rows(out_dir / f"{file_prefix}_实验汇总.csv", rows)
+    write_rows(out_dir / f"{file_prefix}_MC逐次诊断.csv", trial_diagnostics)
+    write_rows(out_dir / f"{file_prefix}_MC分窗口诊断.csv", block_diagnostics)
     if factor == "node_count":
         write_rows(
-            out_dir / "node_count_scaling_diagnostics.csv",
+            out_dir / "节点数扫描_规模变化诊断.csv",
             node_count_scaling_diagnostics(rows),
         )
     if factor == "connectivity":
-        write_rows(out_dir / "connectivity_convergence_summary.csv", connectivity_diagnostics)
-        write_rows(out_dir / "connectivity_time_curves.csv", connectivity_time_rows)
+        write_rows(out_dir / "连通度扫描_稳态迭代步汇总.csv", connectivity_diagnostics)
+        write_rows(out_dir / "连通度扫描_逐迭代曲线数据.csv", connectivity_time_rows)
         plot_connectivity_convergence(connectivity_diagnostics, out_dir)
         plot_connectivity_time_curves(connectivity_time_rows, out_dir)
     if factor == "frequency":
         events = detect_frequency_rebounds(rows, trial_diagnostics, rebound_threshold_db)
-        write_rows(out_dir / "frequency_rebound_events.csv", events)
+        write_rows(out_dir / "载波频率扫描_异常回升事件.csv", events)
         write_frequency_rebound_report(events, rebound_threshold_db, out_dir)
     plot_factor(rows, factor, out_dir)
     return rows
@@ -470,7 +485,7 @@ Detection threshold: {threshold_db:g} dB between adjacent frequencies.
 
 Diagnostic files:
 
-- `frequency_rebound_events.csv`: detected aggregate rebound events.
+- `载波频率扫描_异常回升事件.csv`: detected aggregate rebound events.
 - `frequency_trial_diagnostics.csv`: per-frequency, per-trial final/tail statistics.
 - `frequency_block_trial_diagnostics.csv`: per-frequency, per-trial, per-block final statistics.
 - `frequency/point_XX/debug/*.csv`: per-node 3-D errors when the sweep is run with `--debug`.
@@ -479,7 +494,7 @@ Interpretation: if distance RMSE is unchanged but power and phase change, the re
 carrier-phase wrapping/coherent summation. If only a small fraction of trials rebound, it is Monte Carlo
 variance. If most trials rebound together with a lower distance RMSE, investigate the estimator state.
 """
-    (out_dir / "frequency_rebound_debug_report.md").write_text(report, encoding="utf-8")
+    (out_dir / "载波频率扫描_异常趋势诊断报告.md").write_text(report, encoding="utf-8")
 
 
 def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
@@ -488,18 +503,19 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         return
     group = sorted(rows, key=lambda row: float(row["factor_value"]))
     xs = np.array([float(row["factor_value"]) for row in group], dtype=np.float64)
+    file_prefix = factor_file_label(factor)
     specs = [
-        ("dfpc_tail_power_db", "DPC normalized power (dB)", f"{factor}_dpc_tail_power_db.png"),
-        ("dfpc_tail_gain_over_single_mean_db", "DPC gain over mean single node (dB)", f"{factor}_gain_over_single_mean_db.png"),
-        ("dfpc_tail_phase_std_deg", "DPC phase std (deg)", f"{factor}_dpc_phase_std_deg.png"),
-        ("dfpc_tail_phase_rmse_deg", "DPC phase RMSE (deg)", f"{factor}_dpc_phase_rmse_deg.png"),
-        ("no_algorithm_tail_phase_rmse_deg", "No-algorithm phase RMSE (deg)", f"{factor}_no_algorithm_phase_rmse_deg.png"),
-        ("dfpc_tail_distance_rmse_m", "Distance RMSE (m)", f"{factor}_dfpc_distance_rmse.png"),
-        ("dfpc_tail_uav_rmse_m", "UAV RMSE (m)", f"{factor}_dfpc_uav_rmse.png"),
-        ("dfpc_tail_uav_velocity_rmse_mps", "UAV velocity RMSE (m/s)", f"{factor}_dfpc_uav_velocity_rmse.png"),
-        ("kf_dfpc_tail_power_db", "UAV+Node-KF DPC normalized power (dB)", f"{factor}_kf_dpc_tail_power_db.png"),
-        ("kf_improvement_over_dfpc_db", "KF improvement over DPC (dB)", f"{factor}_kf_improvement_over_dpc_db.png"),
-        ("kf_dfpc_distance_rmse_m", "UAV+Node-KF distance RMSE (m)", f"{factor}_kf_dfpc_distance_rmse.png"),
+        ("dfpc_tail_power_db", "DPC normalized power (dB)", f"{file_prefix}_DPC尾段归一化功率.png"),
+        ("dfpc_tail_gain_over_single_mean_db", "DPC gain over mean single node (dB)", f"{file_prefix}_DPC相对平均单节点增益.png"),
+        ("dfpc_tail_phase_std_deg", "DPC phase std (deg)", f"{file_prefix}_DPC相位标准差.png"),
+        ("dfpc_tail_phase_rmse_deg", "DPC phase RMSE (deg)", f"{file_prefix}_DPC相位RMSE.png"),
+        ("no_algorithm_tail_phase_rmse_deg", "No-algorithm phase RMSE (deg)", f"{file_prefix}_无算法相位RMSE.png"),
+        ("dfpc_tail_distance_rmse_m", "Distance RMSE (m)", f"{file_prefix}_DPC距离RMSE.png"),
+        ("dfpc_tail_uav_rmse_m", "UAV RMSE (m)", f"{file_prefix}_DPC-UAV位置RMSE.png"),
+        ("dfpc_tail_uav_velocity_rmse_mps", "UAV velocity RMSE (m/s)", f"{file_prefix}_DPC-UAV速度RMSE.png"),
+        ("kf_dfpc_tail_power_db", "UAV+Node-KF DPC normalized power (dB)", f"{file_prefix}_KF-DPC尾段归一化功率.png"),
+        ("kf_improvement_over_dfpc_db", "KF improvement over DPC (dB)", f"{file_prefix}_KF-DPC相对DPC提升.png"),
+        ("kf_dfpc_distance_rmse_m", "UAV+Node-KF distance RMSE (m)", f"{file_prefix}_KF-DPC距离RMSE.png"),
     ]
     for key, ylabel, filename in specs:
         ys = np.array([float(row[key]) for row in group], dtype=np.float64)
@@ -522,7 +538,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
                 "kf_dfpc_tail_power_db",
             ],
             "Tail normalized power (dB)",
-            f"{factor}_all_methods_tail_power_db.png",
+            f"{file_prefix}_DPC与KF-DPC尾段功率总览.png",
         ),
         (
             [
@@ -530,7 +546,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
                 "kf_dfpc_phase_std_deg",
             ],
             "Tail residual phase std (deg)",
-            f"{factor}_all_methods_phase_std_deg.png",
+            f"{file_prefix}_DPC与KF-DPC相位标准差对比.png",
         ),
         (
             [
@@ -538,7 +554,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
                 "kf_dfpc_node_rmse_m",
             ],
             "Tail node RMSE (m)",
-            f"{factor}_all_methods_node_rmse.png",
+            f"{file_prefix}_DPC与KF-DPC浮标位置RMSE对比.png",
         ),
     ]
     labels = [method for method, _ in PERFORMANCE_METHODS]
@@ -564,13 +580,13 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
                 "dfpc_tail_power_db",
                 "kf_dfpc_tail_power_db",
                 "Tail normalized power (dB)",
-                "frequency_dfpc_vs_kf_tail_power_db.png",
+                "载波频率扫描_DPC与KF-DPC尾段功率对比.png",
             ),
             (
                 "dfpc_final_power_db",
                 "kf_dfpc_final_power_db",
                 "Final normalized power (dB)",
-                "frequency_dfpc_vs_kf_final_power_db.png",
+                "载波频率扫描_DPC与KF-DPC最终功率对比.png",
             ),
         ]
         for dfpc_key, kf_key, ylabel, filename in comparison_specs:
@@ -598,17 +614,17 @@ def plot_connectivity_convergence(rows: list[dict[str, Any]], out_dir: Path) -> 
         (
             "distance_rmse_convergence_time_s",
             "Distance-RMSE convergence time (s)",
-            "connectivity_distance_rmse_convergence_time.png",
+            "连通度扫描_距离RMSE收敛时间.png",
         ),
         (
             "convergence_time_s_05db",
             "Time to sustained 0.5 dB steady-state band (s)",
-            "connectivity_all_methods_convergence_time.png",
+            "连通度扫描_DPC与KF-DPC功率收敛时间.png",
         ),
         (
             "transient_deficit_mean_db",
             "Mean first-half transient deficit (dB)",
-            "connectivity_all_methods_transient_deficit.png",
+            "连通度扫描_DPC与KF-DPC瞬态功率缺口.png",
         ),
     ]:
         plt.figure(figsize=(10.4, 5.8))
@@ -674,5 +690,5 @@ def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> 
     axes[-1, 0].set_xlabel("iteration index k")
     axes[-1, 1].set_xlabel("iteration index k")
     figure.tight_layout()
-    figure.savefig(out_dir / "connectivity_selected_time_curves.png", dpi=220)
+    figure.savefig(out_dir / "连通度扫描_典型连通度功率与距离RMSE迭代曲线.png", dpi=220)
     plt.close(figure)

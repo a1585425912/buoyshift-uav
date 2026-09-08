@@ -74,7 +74,7 @@ def main() -> None:
             target_mean_degree,
         )
         all_rows.extend(rows)
-    write_rows(out_dir / "modular_dfpc_factor_sweeps_summary.csv", all_rows)
+    write_rows(out_dir / "全部参数扫描_综合汇总.csv", all_rows)
     print(f"Modular factor sweep outputs saved to: {out_dir}")
 
 
