@@ -1,7 +1,7 @@
 """Lightweight position filters used to compare filtering choices in DPC.
 
 All filters expose the same batched interface.  They consume one ``(N, 3)``
-position sample per physical short-time step and expose filtered positions and
+position sample per algorithm iteration and expose filtered positions and
 finite-difference/model velocities.  Keeping these filters in their own module
 lets the DPC simulation remain responsible only for producing observations.
 """

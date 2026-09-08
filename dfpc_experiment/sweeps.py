@@ -171,6 +171,25 @@ def convergence_summary(
     }
 
 
+def distance_rmse_convergence_summary(
+    res: dict[str, Any],
+    method: str,
+) -> dict[str, float | int]:
+    """Return when the configured distance-RMSE convergence rule first holds."""
+    key = (
+        "dpc_phase_ready"
+        if method == METHOD_DFPC
+        else "kf_dpc_phase_ready"
+    )
+    ready = np.asarray(res["consensus_diagnostics"][key], dtype=bool)
+    indices = np.flatnonzero(ready)
+    step = int(indices[0]) if indices.size else int(ready.size)
+    return {
+        "distance_rmse_convergence_step": step,
+        "distance_rmse_convergence_time_s": step * float(res["args"]["Ts"]),
+    }
+
+
 def _fit_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     slope, intercept = np.polyfit(x, y, 1)
     fitted = slope * x + intercept
@@ -295,6 +314,7 @@ def run_factor(
                         **common,
                         "method": method,
                         **convergence_summary(res, method),
+                        **distance_rmse_convergence_summary(res, method),
                     }
                 )
                 for step, power_db in enumerate(res["metrics"][method]["norm_db"]):
@@ -305,6 +325,9 @@ def run_factor(
                             "global_step": step,
                             "physical_time_s": step * float(res["args"]["Ts"]),
                             "normalized_power_db": float(power_db),
+                            "distance_rmse_m": float(
+                                res["metrics"][method]["distance_rmse"][step]
+                            ),
                         }
                     )
         if point_cfg.debug:
@@ -573,6 +596,11 @@ def plot_connectivity_convergence(rows: list[dict[str, Any]], out_dir: Path) -> 
         return
     for key, ylabel, filename in [
         (
+            "distance_rmse_convergence_time_s",
+            "Distance-RMSE convergence time (s)",
+            "connectivity_distance_rmse_convergence_time.png",
+        ),
+        (
             "convergence_time_s_05db",
             "Time to sustained 0.5 dB steady-state band (s)",
             "connectivity_all_methods_convergence_time.png",
@@ -607,13 +635,13 @@ def plot_connectivity_convergence(rows: list[dict[str, Any]], out_dir: Path) -> 
 
 
 def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> None:
-    """Plot low/medium/high connectivity time curves for each research method."""
+    """Plot power and distance-RMSE transients for selected connectivities."""
     if not rows:
         return
     connectivities = sorted({float(row["factor_value"]) for row in rows})
     selected = {connectivities[0], connectivities[len(connectivities) // 2], connectivities[-1]}
-    figure, axes = plt.subplots(3, 2, figsize=(13.0, 11.0), sharex=True)
-    for axis, (method, _) in zip(axes.flat, PERFORMANCE_METHODS):
+    figure, axes = plt.subplots(2, 2, figsize=(13.0, 9.0), sharex=True)
+    for row_index, (method, _) in enumerate(PERFORMANCE_METHODS):
         for connectivity in sorted(selected):
             curve = sorted(
                 (
@@ -624,20 +652,27 @@ def plot_connectivity_time_curves(rows: list[dict[str, Any]], out_dir: Path) -> 
                 ),
                 key=lambda row: int(row["global_step"]),
             )
-            axis.plot(
-                [float(row["physical_time_s"]) for row in curve],
+            axes[row_index, 0].plot(
+                [int(row["global_step"]) for row in curve],
                 [float(row["normalized_power_db"]) for row in curve],
                 linewidth=1.8,
                 label=f"p={connectivity:g}",
             )
-        axis.set_title(method)
-        axis.set_ylabel("normalized power (dB)")
-        axis.grid(True, alpha=0.3)
-        axis.legend()
-    for axis in axes.flat[len(PERFORMANCE_METHODS) :]:
-        axis.set_visible(False)
-    axes[-1, 0].set_xlabel("physical time (s)")
-    axes[-1, 1].set_xlabel("physical time (s)")
+            axes[row_index, 1].plot(
+                [int(row["global_step"]) for row in curve],
+                [float(row["distance_rmse_m"]) for row in curve],
+                linewidth=1.8,
+                label=f"p={connectivity:g}",
+            )
+        axes[row_index, 0].set_title(f"{method}: normalized power")
+        axes[row_index, 1].set_title(f"{method}: distance RMSE")
+        axes[row_index, 0].set_ylabel("normalized power (dB)")
+        axes[row_index, 1].set_ylabel("distance RMSE (m)")
+        for axis in axes[row_index]:
+            axis.grid(True, alpha=0.3)
+            axis.legend()
+    axes[-1, 0].set_xlabel("iteration index k")
+    axes[-1, 1].set_xlabel("iteration index k")
     figure.tight_layout()
     figure.savefig(out_dir / "connectivity_selected_time_curves.png", dpi=220)
     plt.close(figure)

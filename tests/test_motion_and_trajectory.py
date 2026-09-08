@@ -27,6 +27,17 @@ from dfpc_experiment.trajectory import (
 
 
 class MotionModelTests(unittest.TestCase):
+    def test_default_scene_represents_moderate_current_without_base_station(self) -> None:
+        cfg = ExperimentConfig()
+        self.assertAlmostEqual(cfg.fc_mhz, 20.0)
+        self.assertAlmostEqual(cfg.buoy_wave_speed, 0.3)
+        self.assertAlmostEqual(cfg.buoy_random_displacement_std, 0.03)
+        self.assertAlmostEqual(cfg.buoy_center_accumulation_ratio, 0.05)
+        self.assertAlmostEqual(cfg.buoy_kf_accel_std, 0.0)
+        self.assertAlmostEqual(cfg.buoy_kf_initial_velocity_std, 0.01)
+        self.assertAlmostEqual(cfg.uav_obs_noise, 3.0)
+        self.assertAlmostEqual(cfg.buoy_center_obs_noise, 1.0)
+
     def test_default_geometry_uses_unit_path_loss(self) -> None:
         cfg = ExperimentConfig(N=2, tx_power=5.0)
         _, amp, p_ideal, p_single_mean, p_single_best = geometry_terms(

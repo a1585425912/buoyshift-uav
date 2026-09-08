@@ -24,8 +24,8 @@ class ExperimentConfig:
     # N: 节点/浮标数量。
     # fc_mhz: 工作频率，频率越高，同样距离误差会造成更大的相位误差。
     # T_long: 浮标运动/输出长块数。
-    # K: 每个长块内的浮标物理短步数；块时长恒为 K*Ts。
-    N: int = 1000
+    # K: 每个长块内的算法迭代步数；相邻迭代间隔为 Ts，块时长恒为 K*Ts。
+    N: int = 2000
     fc_mhz: float = 20.0
     T_long: int = 20
     K: int = 30
@@ -33,7 +33,7 @@ class ExperimentConfig:
     uav_height: float = 120.0
     uav_start_x: float | None = None
     uav_start_y: float | None = None
-    uav_speed: float = 20.0
+    uav_speed: float = 15.0
     heading_deg: float = 20.0
     # Legacy CLI/output field. Effective block duration is always K * Ts.
     TL: float = 1.0
@@ -54,8 +54,8 @@ class ExperimentConfig:
     # Additive position-model uncertainty for the full DPC trajectory
     # pseudo-measurement; OLS supplies the remaining position/velocity covariance.
     uav_dpc_prior_noise_std: float = 0.3
-    buoy_random_displacement_std: float = 0.5
-    buoy_center_accumulation_ratio: float = 0.1
+    buoy_random_displacement_std: float = 0.03
+    buoy_center_accumulation_ratio: float = 0.05
     buoy_center_obs_noise: float = 1.0
     system_phase_std_deg: float = 3.0
 
@@ -67,11 +67,16 @@ class ExperimentConfig:
     uav_kf_initial_velocity_std: float = 20.0
     # 保留给历史独立实验脚本的速度初始化噪声；窗口级主流程不读取真实 UAV 速度。
     uav_kf_velocity_init_std: float = 2.0
-    buoy_kf_accel_std: float = 1.0
-    buoy_kf_initial_velocity_std: float = 2.0
+    # Mean current velocity is fixed; stochastic center accumulation is wired
+    # separately as position diffusion when the buoy KF is constructed.
+    buoy_kf_accel_std: float = 0.0
+    # The current speed/direction are fixed and used as the initial velocity
+    # mean.  Keep only a small mismatch allowance; a broad prior lets noisy
+    # position fixes create a spurious early velocity transient.
+    buoy_kf_initial_velocity_std: float = 0.01
 
     # 位移中心按固定洋流速度和方向确定性移动。
-    buoy_wave_speed: float = 5.0
+    buoy_wave_speed: float = 0.3
     buoy_wave_heading_deg: float = 0.0
 
     # -------------------------
@@ -84,7 +89,7 @@ class ExperimentConfig:
     # uav_consensus_steps: 保留的批量共识接口；主循环每个 iteration 做一次。
     tx_power: float = 5.0
     path_loss_alpha: float = 0.0
-    global_connectivity: float = 0.03
+    global_connectivity: float = 0.05
     uav_consensus_steps: int = 3
     # Convergence uses the absolute change of distance RMSE between physical
     # steps k and k-1.  It is a simulation-only criterion because d_true is
@@ -95,7 +100,7 @@ class ExperimentConfig:
     # -------------------------
     # Monte Carlo 与计算后端
     # -------------------------
-    mc_trials: int = 50
+    mc_trials: int = 20
     mc_seed_stride: int = 1009
     seed: int = 5200
     device: str = "auto"

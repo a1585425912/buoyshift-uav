@@ -26,7 +26,7 @@ migrated into `sim_core.py`.
 physical steps, so the effective block duration is `K*Ts`. `TL` is kept only for
 CLI backward compatibility and is not used by the experiment loop. Each buoy
 center moves continuously with a fixed current speed and direction. At every
-time step, a small random displacement is sampled; a configurable fraction
+iteration, separated from the next one by `Ts`, a small random displacement is sampled; a configurable fraction
 accumulates into the center and the remainder is the instantaneous offset.
 
 ```powershell
@@ -41,7 +41,7 @@ trajectory-state observation; only then does `W` fuse the UAV posterior states
 and covariances. Node states are distinct physical targets and are therefore
 not averaged across buoys. Trajectory statistics and both KF states retain
 history across long-block boundaries. Convergence is simultaneous network
-agreement in UAV position and velocity, not state change between time steps.
+agreement in UAV position and velocity, not state change between iterations.
 Outputs compare the pure-random `No Algorithm` baseline with the two retained
 algorithms: DPC and KF-DPC.
 

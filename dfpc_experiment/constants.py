@@ -22,7 +22,7 @@ METHODS = [
     METHOD_KF_DFPC,
 ]
 
-# 每个时间步都会保存这些指标。
+# 每个迭代步都会保存这些指标。
 # 注意：
 # - gain_linear/norm_db 是相对于理想多节点相干功率 P_ideal 的归一化功率。
 # - gain_over_single_* 是多节点相对于单节点发射的增益，适合节点数实验。

@@ -21,84 +21,89 @@ from .io_utils import write_rows
 from .metrics import tail_summary
 
 
-def plot_metric(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig, out_dir: Path, key: str, ylabel: str, filename: str) -> None:
-    """按全局时间步画曲线。
-
-    横轴是 global step = long block 和 iteration 混合后的时间序号。
-    图中的细竖线表示长时间尺度 block 的边界。
-    """
-    iter_count = cfg.K
-    steps = np.arange(cfg.T_long * iter_count)
-    plt.figure(figsize=(11, 6))
-    for method in metrics:
-        vals = metrics[method][key]
-        if np.all(np.isnan(vals)):
-            continue
-        plt.plot(steps, vals, linewidth=1.8, label=method)
-    if key == "norm_db":
-        plt.axhline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-    for block in range(1, cfg.T_long):
-        plt.axvline(block * cfg.K, color="black", linewidth=0.4, alpha=0.12)
-    plt.xlabel("Time step")
-    plt.ylabel(ylabel)
-    plt.title(f"{cfg.fc_mhz:.0f} MHz step-0 recursive-KF DPC: {ylabel}")
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=9)
-    plt.tight_layout()
-    plt.savefig(out_dir / filename, dpi=220)
-    plt.close()
+PLOT_SMOOTHING_WINDOW = 11
 
 
-def iteration_profiles(metrics: dict[str, dict[str, np.ndarray]], cfg: ExperimentConfig) -> dict[str, dict[str, np.ndarray]]:
-    """把所有长 block 按 iteration 对齐后求平均。
+def causal_exponential_average(
+    values: np.ndarray,
+    span: int = PLOT_SMOOTHING_WINDOW,
+) -> np.ndarray:
+    """Return a NaN-aware causal EMA without modifying the raw series."""
+    series = np.asarray(values, dtype=np.float64)
+    if series.ndim != 1:
+        raise ValueError("values must be one-dimensional")
+    if series.size == 0:
+        return series.copy()
+    width = max(int(span), 1)
+    if width == 1:
+        return series.copy()
+    alpha = 2.0 / (width + 1.0)
+    smoothed = np.full(series.shape, np.nan, dtype=np.float64)
+    previous = np.nan
+    for index, value in enumerate(series):
+        if np.isfinite(value):
+            previous = value if not np.isfinite(previous) else alpha * value + (1.0 - alpha) * previous
+        smoothed[index] = previous
+    return smoothed
 
-    这个函数生成“横轴为迭代步数”的图，用来观察算法是否逐步收敛。
-    """
-    iter_count = cfg.K
-    profiles: dict[str, dict[str, np.ndarray]] = {}
-    for method in metrics:
-        profiles[method] = {}
-        for key in METRIC_KEYS:
-            vals = metrics[method][key].reshape(cfg.T_long, iter_count)
-            profiles[method][key] = np.full(iter_count, np.nan, dtype=np.float64) if np.all(np.isnan(vals)) else np.nanmean(vals, axis=0)
-        profiles[method]["norm_db"] = 10.0 * np.log10(np.maximum(profiles[method]["gain_linear"], 1e-30))
-    return profiles
 
-
-def plot_iteration_profile(
-    profiles: dict[str, dict[str, np.ndarray]],
+def plot_metric(
+    metrics: dict[str, dict[str, np.ndarray]],
     cfg: ExperimentConfig,
     out_dir: Path,
     key: str,
     ylabel: str,
     filename: str,
+    *,
+    log_y: bool = False,
 ) -> None:
-    """画横轴为 iteration step 的平均收敛曲线。"""
-    iters = np.arange(cfg.K)
-    plt.figure(figsize=(9.5, 5.6))
-    for method in profiles:
-        vals = profiles[method][key]
+    """按全局迭代步画曲线。
+
+    横轴是 global iteration = long block 和 iteration 合并后的迭代序号。
+    PNG 使用因果指数平滑突出趋势，并以浅色细线保留原始波动。CSV/NPZ
+    始终保存未平滑数据。K 只是连续物理时间轴的输出分段，因此不再画
+    容易被误解为状态重置的 block 边界线。
+    """
+    iter_count = cfg.K
+    steps = np.arange(cfg.T_long * iter_count)
+    plt.figure(figsize=(11, 6))
+    power_linear_keys = {
+        "norm_db": "gain_linear",
+        "gain_over_single_mean_db": "gain_over_single_mean_linear",
+        "gain_over_single_best_db": "gain_over_single_best_linear",
+    }
+    for method_index, method in enumerate(metrics):
+        vals = metrics[method][key]
         if np.all(np.isnan(vals)):
             continue
-        plt.plot(iters, vals, marker="o", markersize=3.2, linewidth=1.9, label=method)
+        color = f"C{method_index}"
+        plt.plot(steps, vals, color=color, linewidth=0.65, alpha=0.16)
+        if key in power_linear_keys:
+            linear = causal_exponential_average(metrics[method][power_linear_keys[key]])
+            trend = 10.0 * np.log10(np.maximum(linear, 1e-30))
+        else:
+            trend = causal_exponential_average(vals)
+        plt.plot(steps, trend, color=color, linewidth=2.2, label=method)
     if key == "norm_db":
         plt.axhline(0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-    plt.xlabel("Short-time step")
+    if log_y:
+        plt.yscale("log")
+    plt.xlabel("Iteration index k")
     plt.ylabel(ylabel)
-    plt.title(f"{cfg.fc_mhz:.0f} MHz DPC by iteration step: {ylabel}")
+    plt.title(
+        f"{cfg.fc_mhz:.0f} MHz continuous DPC: {ylabel}\n"
+        f"causal EMA, span={PLOT_SMOOTHING_WINDOW} (raw trace shown faintly)"
+    )
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=9)
     plt.tight_layout()
     plt.savefig(out_dir / filename, dpi=220)
     plt.close()
-
-
 def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
     """保存一次完整实验的所有输出。
 
     输出包括：
-    - 全局时间步曲线；
-    - iteration 轴曲线；
+    - 全局迭代步曲线；
     - curves/block_final/summary CSV；
     - NPZ 原始数组；
     - Markdown 简短报告；
@@ -118,23 +123,22 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
     plot_metric(metrics, cfg, out_dir, "distance_rmse", "distance RMSE (m)", "dpc_distance_rmse.png")
     plot_metric(metrics, cfg, out_dir, "node_rmse", "node position RMSE (m)", "dpc_node_rmse.png")
     plot_metric(metrics, cfg, out_dir, "uav_rmse", "UAV position RMSE (m)", "dpc_uav_rmse.png")
-    plot_metric(metrics, cfg, out_dir, "uav_line_intercept_rmse", "UAV line intercept RMSE (m)", "dpc_uav_line_intercept_rmse.png")
-    plot_metric(metrics, cfg, out_dir, "uav_velocity_rmse", "UAV velocity RMSE (m/s)", "dpc_uav_velocity_rmse.png")
-
-    profiles = iteration_profiles(metrics, cfg)
-    plot_iteration_profile(profiles, cfg, out_dir, "norm_db", r"$10\log_{10}(P_J/P_{ideal})$ (dB)", "dpc_iteration_axis_power_db.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "gain_over_single_mean_db", r"$10\log_{10}(P_J/P_{single,mean})$ (dB)", "dpc_iteration_axis_gain_over_single_mean_db.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "phase_std_deg", "residual phase std (deg)", "dpc_iteration_axis_phase_std_deg.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "phase_rmse_deg", "residual phase RMSE (deg)", "dpc_iteration_axis_phase_rmse_deg.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "distance_rmse", "distance RMSE (m)", "dpc_iteration_axis_distance_rmse.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "node_rmse", "node position RMSE (m)", "dpc_iteration_axis_node_rmse.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "uav_rmse", "UAV position RMSE (m)", "dpc_iteration_axis_uav_rmse.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "uav_line_intercept_rmse", "UAV line intercept RMSE (m)", "dpc_iteration_axis_uav_line_intercept_rmse.png")
-    plot_iteration_profile(profiles, cfg, out_dir, "uav_velocity_rmse", "UAV velocity RMSE (m/s)", "dpc_iteration_axis_uav_velocity_rmse.png")
+    # The line-intercept RMSE remains in CSV/NPZ for diagnosis, but it is not a
+    # primary performance curve: b = p - t*v amplifies tiny velocity errors as
+    # physical time grows and can look like current-position divergence.
+    plot_metric(
+        metrics,
+        cfg,
+        out_dir,
+        "uav_velocity_rmse",
+        "UAV velocity RMSE (m/s)",
+        "dpc_uav_velocity_rmse.png",
+        log_y=True,
+    )
 
     iter_count = cfg.K
     rows = []
-    # 每个 global step 的完整曲线数据，适合调试异常点。
+    # 每个 global iteration 的完整曲线数据，适合调试异常点。
     for sidx in range(res["total_steps"]):
         long_block = sidx // iter_count
         row: dict[str, Any] = {
@@ -154,20 +158,8 @@ def save_outputs(res: dict[str, Any], out_dir: Path) -> None:
     write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_trial_summary.csv", res["trial_summary_rows"])
     write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_trial_block.csv", res["trial_block_rows"])
 
-    iter_rows = []
-    # 按 iteration 对齐后的平均曲线数据，适合论文图表。
-    for it in range(iter_count):
-        row = {"iteration_step": it}
-        for method in methods:
-            prefix = method.lower().replace(" ", "_").replace("-", "_")
-            for key in METRIC_KEYS:
-                val = profiles[method][key][it]
-                row[f"{prefix}_{key}"] = "" if np.isnan(val) else float(val)
-        iter_rows.append(row)
-    write_rows(out_dir / f"dual_timescale_dpc_{freq_tag}_iteration_axis.csv", iter_rows)
-
     summary_rows = []
-    # 后 20% 时间步的稳态摘要。
+    # 后 20% 迭代步的稳态摘要。
     dfpc_reference = tail_summary(res, METHOD_DFPC)
     for method in methods:
         row = {
@@ -240,12 +232,14 @@ This is the modular DPC experiment.
 
 Monte Carlo trials: {res['mc_trials']}. Global consensus device: `{res['compute_device']}`.
 Physical duration: {res['physical_duration_s']:.3f} s; block duration K*Ts={cfg.K * cfg.Ts:g} s; Ts={cfg.Ts:g} s.
-Buoy centers move at {cfg.buoy_wave_speed:g} m/s in the {cfg.buoy_wave_heading_deg:g} deg direction. At every time step, a random displacement with std={cfg.buoy_random_displacement_std:g} m per horizontal axis is sampled; {cfg.buoy_center_accumulation_ratio:g} of it accumulates into the center and the remainder is the instantaneous offset.
+Buoy centers move at {cfg.buoy_wave_speed:g} m/s in the {cfg.buoy_wave_heading_deg:g} deg direction. At every iteration, separated by Ts={cfg.Ts:g} s, a random displacement with std={cfg.buoy_random_displacement_std:g} m per horizontal axis is sampled; {cfg.buoy_center_accumulation_ratio:g} of it accumulates into the center and the remainder is the instantaneous offset.
 Each buoy independently estimates the UAV trajectory. DPC reaches consensus on
 `[bx,vx,by,vy,bz,vz]` and unit flight direction `[dx,dy,dz]`.
 UAV+Node-KF DPC filters both UAV and buoy states as `[x,y,z,vx,vy,vz]` and uses 3-D ranges.
 The only filtering branch retained is the linear 3-D constant-velocity Kalman filter.
-Power is averaged as linear gain before conversion to dB. Positive power change versus DPC is better.
+    Power is averaged as linear gain before conversion to dB. Positive power change versus DPC is better.
+    PNG curves use a causal EMA with span {PLOT_SMOOTHING_WINDOW} and show the raw trace faintly; CSV and NPZ remain unsmoothed.
+    K is only an output grouping on one continuous physical timeline, so no modulo-K "iteration-axis" figures are generated.
 Every method uses an ideal 0/pi polarity choice. Effective residual phases are folded modulo pi into [-90, 90) deg; they are not clipped.
 `No Algorithm` is the pure-random reference: it transmits with theta=0 and uses no observations, consensus, or filtering.
 

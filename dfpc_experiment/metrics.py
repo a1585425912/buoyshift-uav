@@ -124,7 +124,7 @@ def mean_stack(arrays: list[np.ndarray]) -> np.ndarray:
 
 
 def tail_summary(res: dict[str, Any], method: str, tail_ratio: float = 0.8) -> dict[str, float | str]:
-    """取后 20% 时间步作为稳态区域，生成报告中的摘要指标。"""
+    """取后 20% 迭代步作为稳态区域，生成报告中的摘要指标。"""
     metrics = res["metrics"]
     total_steps = int(res["total_steps"])
     tail = slice(int(tail_ratio * total_steps), None)

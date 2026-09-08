@@ -2,7 +2,7 @@
 
 这个文件把各模块串起来：
 1. 初始化场景；
-2. 每个长块推进 K 个 Ts 短步并产生观测；
+2. 每个长块推进 K 个迭代步，相邻迭代间隔为 Ts，并产生观测；
 3. 每个节点用连续观测拟合 UAV 轨迹 [位置,速度] 及协方差；
 4. DPC 对完整轨迹参数 [截距,速度] 做通信更新，KF-DPC 先本地滤波再做轨迹共识；
 5. 多个 Monte Carlo trial 做平均。
@@ -135,7 +135,7 @@ def run_single_trial(
 ) -> dict[str, Any]:
     """运行一次 Monte Carlo trial。
 
-    注意：这里的 iteration 是算法迭代，同时也是物理世界的一次 Ts 短步。
+    注意：iteration 是算法迭代编号，相邻两次迭代对应 Ts 秒的物理时间。
     相邻 block 之间物理世界严格推进 K*Ts 秒。
     """
     rng_scene = np.random.default_rng(seed)
@@ -229,6 +229,11 @@ def run_single_trial(
                 cfg.buoy_kf_accel_std,
                 cfg.buoy_kf_initial_velocity_std,
                 initial_velocity_xyz=state.buoy_wave_mean_velocity,
+                position_diffusion=(
+                    cfg.buoy_center_accumulation_ratio
+                    * cfg.buoy_random_displacement_std
+                    / np.sqrt(cfg.Ts)
+                ),
                 velocity_propagate=True,
             )
             # 浮标属于不同物理目标：每个浮标只维护自己的 KF 后验，
@@ -251,7 +256,7 @@ def run_single_trial(
                     cfg.uav_kf_initial_velocity_std,
                 )
 
-            # 解除“block 内真值固定”：除 iteration 0 外，每个短步都推进一个 Ts 后重新观测。
+            # 解除“block 内真值固定”：除 iteration 0 外，每次迭代都推进 Ts 秒后重新观测。
             # ---- 1) DPC：各节点先从连续观测估计 [轨迹截距,速度]，
             #          再用 W 更新整条轨迹，最后预测当前位置。
             uav_trajectory_dfpc = dpc_trajectory_prediction(
@@ -301,7 +306,7 @@ def run_single_trial(
             node_state_kf = node_kf.x.copy()
             node_est_kf = node_state_kf[:, :3]
 
-            # 2. 当前真值下的几何量、相位噪声、无算法基线（每个短步真值都变，必须重算）。
+            # 2. 当前真值下的几何量、相位噪声、无算法基线（每次迭代真值都变，必须重算）。
             phi_true, amp, p_ideal, p_single_mean, p_single_best = geometry_terms(
                 cfg, p_u_true, buoy_true_short, k_const
             )
@@ -344,7 +349,7 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum(velocity_error**2, axis=1)))
             )
 
-            # KF 方法指标：UAV 使用窗口级后验/外推，浮标使用短步节点 KF 后验。
+            # KF 方法指标：UAV 使用窗口级后验/外推，浮标使用逐迭代节点 KF 后验。
             kf_result = evaluate_dfpc(
                 uav_est_kf,
                 node_est_kf,

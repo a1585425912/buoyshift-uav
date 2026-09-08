@@ -89,7 +89,7 @@ def advance_truth_one_short_step(
     """
     step_dt = float(cfg.Ts if dt is None else dt)
     if step_dt <= 0.0:
-        raise ValueError("physical time step must be positive")
+        raise ValueError("physical interval per iteration must be positive")
 
     state.uav_center_true = state.uav_center_true + state.uav_velocity_true * step_dt
     displacement_xy = backend.gaussian_position_offsets(
@@ -117,7 +117,7 @@ def advance_truth_one_long_block(
     state: SceneState,
     rng_scene: np.random.Generator,
 ) -> None:
-    """推进一个长块，即 K 个持续 Ts 的物理短时间步。"""
+    """推进一个长块，即 K 个间隔为 Ts 的算法迭代步。"""
     duration = float(cfg.K) * float(cfg.Ts)
     short_dt = float(cfg.Ts)
     if duration < 0.0 or short_dt <= 0.0:
