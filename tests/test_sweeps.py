@@ -45,8 +45,10 @@ class SweepTests(unittest.TestCase):
         row = summarize_result(result, "node_count", 20.0, "N=20")
         for key in [
             "dfpc_tail_power_db",
+            "node_kf_dpc_tail_power_db",
             "kf_dfpc_tail_power_db",
             "dfpc_tail_node_rmse_m",
+            "node_kf_dpc_node_rmse_m",
             "kf_dfpc_node_rmse_m",
         ]:
             self.assertTrue(np.isfinite(row[key]), key)
@@ -69,13 +71,15 @@ class SweepTests(unittest.TestCase):
                 {
                     "factor_value": node_count,
                     "dfpc_tail_power_db": power,
+                    "node_kf_dpc_tail_power_db": power,
                     "kf_dfpc_tail_power_db": power,
                     "dfpc_tail_gain_over_single_mean_db": gain,
+                    "node_kf_dpc_gain_over_single_mean_db": gain,
                     "kf_dfpc_gain_over_single_mean_db": gain,
                 }
             )
         diagnostics = node_count_scaling_diagnostics(rows)
-        self.assertEqual(len(diagnostics), 2)
+        self.assertEqual(len(diagnostics), 3)
         self.assertTrue(all(row["suspicious_linear_growth"] for row in diagnostics))
         self.assertTrue(
             all(abs(row["gain_slope_error_from_20_db"]) < 1e-10 for row in diagnostics)

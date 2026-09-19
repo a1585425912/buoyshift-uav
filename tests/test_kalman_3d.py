@@ -5,7 +5,13 @@ import unittest
 import numpy as np
 
 from dfpc_experiment.config import ExperimentConfig
-from dfpc_experiment.constants import METHOD_DFPC, METHOD_KF_DFPC, METHOD_NO_ALG
+from dfpc_experiment.constants import (
+    METHOD_DFPC,
+    METHOD_KF_DFPC,
+    METHOD_NODE_KF_DPC,
+    METHOD_NO_ALG,
+    METHOD_SHORE_BROADCAST,
+)
 from dfpc_experiment.experiment import consensus_covariance, run_experiment
 from dfpc_experiment.kalman import make_cv3d_filter
 from dfpc_experiment.scenario import current_truth, init_scene, observe_positions
@@ -144,7 +150,32 @@ class Kalman3DTests(unittest.TestCase):
             cfg.uav_speed,
         )
 
-    def test_only_dpc_and_kf_dpc_are_exposed_as_algorithms(self) -> None:
+    def test_shared_warmup_is_consumed_before_formal_step_zero(self) -> None:
+        cfg = ExperimentConfig(
+            N=24,
+            T_long=2,
+            K=3,
+            warmup_steps=5,
+            mc_trials=1,
+            device="cpu",
+            Ts=0.2,
+        )
+        result = run_experiment(cfg)
+        total_steps = cfg.T_long * cfg.K
+        self.assertEqual(result["uav_kf_trajectory_initializations"], 1)
+        self.assertEqual(
+            result["uav_kf_position_updates"],
+            total_steps + cfg.warmup_steps - 1,
+        )
+        self.assertEqual(result["uav_kf_initialization_step"], -cfg.warmup_steps)
+        self.assertFalse(
+            np.allclose(
+                result["metrics"][METHOD_KF_DFPC]["uav_rmse"][0],
+                result["metrics"][METHOD_DFPC]["uav_rmse"][0],
+            )
+        )
+
+    def test_dpc_kf_variants_are_exposed_as_algorithms(self) -> None:
         cfg = ExperimentConfig(
             N=40,
             T_long=2,
@@ -156,11 +187,39 @@ class Kalman3DTests(unittest.TestCase):
         self.assertEqual(set(result["metrics"]), set(result["methods"]))
         self.assertEqual(
             set(result["methods"]),
-            {METHOD_NO_ALG, METHOD_DFPC, METHOD_KF_DFPC},
+            {METHOD_NO_ALG, METHOD_DFPC, METHOD_NODE_KF_DPC, METHOD_KF_DFPC},
+        )
+        np.testing.assert_allclose(
+            result["metrics"][METHOD_NODE_KF_DPC]["uav_rmse"],
+            result["metrics"][METHOD_DFPC]["uav_rmse"],
+        )
+        self.assertLess(
+            np.mean(result["metrics"][METHOD_NODE_KF_DPC]["node_rmse"]),
+            np.mean(result["metrics"][METHOD_DFPC]["node_rmse"]),
         )
         self.assertTrue(np.all(np.isnan(result["metrics"][METHOD_NO_ALG]["uav_rmse"])))
         self.assertNotIn("cluster_diagnostics", result)
         self.assertFalse(any("Cluster" in method or "Subgraph" in method for method in result["methods"]))
+
+    def test_ideal_shore_broadcast_uses_current_positions(self) -> None:
+        cfg = ExperimentConfig(
+            N=32,
+            T_long=2,
+            K=3,
+            mc_trials=1,
+            device="cpu",
+            system_phase_std_deg=0.0,
+            shore_broadcast_enabled=True,
+            shore_broadcast_uav_noise=0.0,
+            shore_broadcast_node_noise=0.0,
+        )
+        result = run_experiment(cfg)
+        metrics = result["metrics"][METHOD_SHORE_BROADCAST]
+        self.assertIn(METHOD_SHORE_BROADCAST, result["methods"])
+        np.testing.assert_allclose(metrics["distance_rmse"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(metrics["node_rmse"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(metrics["uav_rmse"], 0.0, atol=1e-12)
+        np.testing.assert_allclose(metrics["norm_db"], 0.0, atol=1e-12)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,9 @@ from .constants import (
     ERROR_KEYS,
     METHOD_DFPC,
     METHOD_KF_DFPC,
+    METHOD_NODE_KF_DPC,
     METHOD_NO_ALG,
+    METHOD_SHORE_BROADCAST,
     METHODS,
     METRIC_KEYS,
 )
@@ -140,6 +142,7 @@ def run_single_trial(
     """
     rng_scene = np.random.default_rng(seed)
     rng_obs = np.random.default_rng(seed + 3000003)
+    rng_broadcast = np.random.default_rng(seed + 6000007)
 
     fc_hz = float(cfg.fc_mhz) * 1e6
     lam = 3e8 / fc_hz
@@ -149,7 +152,7 @@ def run_single_trial(
     block_duration_s = float(cfg.K) * float(cfg.Ts)
 
     state = init_scene(cfg, rng_scene)
-    methods = METHODS
+    methods = [*METHODS, METHOD_SHORE_BROADCAST] if cfg.shore_broadcast_enabled else list(METHODS)
     adjacency = state.W_global > 1e-12
     np.fill_diagonal(adjacency, False)
     graph_diagnostics = {
@@ -159,17 +162,6 @@ def run_single_trial(
     # new independent value at every short step creates non-physical power
     # zigzags even when the geometry moves smoothly.
     eps_trial = rng_scene.normal(0.0, np.deg2rad(cfg.system_phase_std_deg), size=cfg.N)
-    true_line_params = np.array(
-        [
-            state.uav_center_true[0],
-            state.uav_velocity_true[0],
-            state.uav_center_true[1],
-            state.uav_velocity_true[1],
-            state.uav_center_true[2],
-            state.uav_velocity_true[2],
-        ],
-        dtype=np.float64,
-    )
     uav_kf: BatchCVKalman3D | None = None
     uav_kf_trajectory_initializations = 0
     uav_kf_position_updates = 0
@@ -184,7 +176,78 @@ def run_single_trial(
         cfg.dpc_distance_rmse_delta_tol_m,
         cfg.dpc_consensus_hold_steps,
     )
+    node_kf_dpc_convergence = DistanceRMSEConvergenceTracker(
+        cfg.dpc_distance_rmse_delta_tol_m,
+        cfg.dpc_consensus_hold_steps,
+    )
     node_kf: BatchCVKalman3D | None = None
+
+    # Optional shared pre-roll.  Its samples live at negative time and are not
+    # written to metrics, so the first plotted sample remains formal time k=0.
+    for warmup_index in range(cfg.warmup_steps):
+        warmup_time_s = (warmup_index - cfg.warmup_steps) * float(cfg.Ts)
+        p_u_true, buoy_true_short = current_truth(state)
+        uav_obs_short, buoy_obs_short = observe_positions(cfg, p_u_true, buoy_true_short, rng_obs)
+        local_line_params = update_local_line_estimates(line_estimator, warmup_time_s, uav_obs_short)
+        local_trajectory_prediction = predict_trajectory(
+            local_line_params,
+            line_estimator,
+            warmup_time_s,
+            cfg.uav_obs_noise,
+            cfg.uav_kf_initial_velocity_std,
+        )
+        if uav_kf is None:
+            uav_kf = initialize_uav_filter(
+                local_trajectory_prediction,
+                cfg,
+                cfg.Ts,
+                warmup_time_s,
+                state.W_global,
+                state.W_global_gpu,
+            )
+            uav_kf_trajectory_initializations += 1
+        else:
+            update_uav_filter(
+                uav_kf,
+                local_trajectory_prediction,
+                warmup_time_s,
+                state.W_global,
+                state.W_global_gpu,
+            )
+            uav_kf_position_updates += 1
+
+        if node_kf is None:
+            node_kf = make_cv3d_filter(
+                buoy_obs_short,
+                cfg.Ts,
+                cfg.buoy_center_obs_noise,
+                cfg.buoy_kf_accel_std,
+                cfg.buoy_kf_initial_velocity_std,
+                initial_velocity_xyz=state.buoy_wave_mean_velocity,
+                position_diffusion=(
+                    cfg.buoy_center_accumulation_ratio
+                    * cfg.buoy_random_displacement_std
+                    / np.sqrt(cfg.Ts)
+                ),
+                velocity_propagate=True,
+            )
+        else:
+            node_kf.predict()
+            node_kf.update(buoy_obs_short)
+        advance_truth_one_short_step(cfg, state, rng_scene, cfg.Ts)
+
+    # The trajectory intercept is defined at formal time zero, after pre-roll.
+    true_line_params = np.array(
+        [
+            state.uav_center_true[0],
+            state.uav_velocity_true[0],
+            state.uav_center_true[1],
+            state.uav_velocity_true[1],
+            state.uav_center_true[2],
+            state.uav_velocity_true[2],
+        ],
+        dtype=np.float64,
+    )
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}
         for method in methods
@@ -194,6 +257,8 @@ def run_single_trial(
         "dpc_phase_ready": np.zeros(total_steps, dtype=bool),
         "kf_dpc_distance_rmse_delta_m": np.full(total_steps, np.nan, dtype=np.float64),
         "kf_dpc_phase_ready": np.zeros(total_steps, dtype=bool),
+        "node_kf_dpc_distance_rmse_delta_m": np.full(total_steps, np.nan, dtype=np.float64),
+        "node_kf_dpc_phase_ready": np.zeros(total_steps, dtype=bool),
     }
     for key in ["distance_rmse", "node_rmse", "uav_rmse", "uav_line_intercept_rmse", "uav_velocity_rmse"]:
         metrics[METHOD_NO_ALG][key].fill(np.nan)
@@ -298,10 +363,10 @@ def run_single_trial(
             kf_velocity = uav_state[:, 3:]
             # ---- 3) 持久节点 KF：predict（dt=Ts）+ 用本轮同一份节点观测 z_b 更新。
             #     浮标不做跨节点共识，每个节点只使用自己的 KF 状态。
-            if sidx > 0:
+            if sidx > 0 or cfg.warmup_steps > 0:
                 node_kf.predict()
             z_b_short_kf = buoy_obs_short
-            if sidx > 0:
+            if sidx > 0 or cfg.warmup_steps > 0:
                 node_kf.update(z_b_short_kf)
             node_state_kf = node_kf.x.copy()
             node_est_kf = node_state_kf[:, :3]
@@ -349,6 +414,50 @@ def run_single_trial(
                 np.sqrt(np.mean(np.sum(velocity_error**2, axis=1)))
             )
 
+            # 仅节点 KF：UAV 估计与普通 DPC 完全相同，只替换浮标位置后验。
+            node_kf_result = evaluate_dfpc(
+                uav_est_dfpc,
+                node_est_kf,
+                p_u_true,
+                buoy_true_short,
+                phi_true,
+                amp,
+                eps,
+                k_const,
+                p_ideal,
+                p_single_mean,
+                p_single_best,
+            )
+
+            broadcast_result = None
+            if cfg.shore_broadcast_enabled:
+                broadcast_uav_fix = p_u_true + rng_broadcast.normal(
+                    0.0, cfg.shore_broadcast_uav_noise, size=3
+                )
+                broadcast_uav_est = np.broadcast_to(broadcast_uav_fix, (cfg.N, 3))
+                broadcast_node_est = buoy_true_short + rng_broadcast.normal(
+                    0.0, cfg.shore_broadcast_node_noise, size=(cfg.N, 3)
+                )
+                broadcast_result = evaluate_dfpc(
+                    broadcast_uav_est,
+                    broadcast_node_est,
+                    p_u_true,
+                    buoy_true_short,
+                    phi_true,
+                    amp,
+                    eps,
+                    k_const,
+                    p_ideal,
+                    p_single_mean,
+                    p_single_best,
+                )
+                broadcast_result["uav_line_intercept_rmse"] = np.nan
+                broadcast_result["uav_velocity_rmse"] = np.nan
+            node_kf_result["uav_line_intercept_rmse"] = dfpc_result[
+                "uav_line_intercept_rmse"
+            ]
+            node_kf_result["uav_velocity_rmse"] = dfpc_result["uav_velocity_rmse"]
+
             # KF 方法指标：UAV 使用窗口级后验/外推，浮标使用逐迭代节点 KF 后验。
             kf_result = evaluate_dfpc(
                 uav_est_kf,
@@ -377,16 +486,26 @@ def run_single_trial(
             kf_dpc_rmse_delta, kf_dpc_ready = kf_dpc_convergence.update(
                 kf_result["distance_rmse"]
             )
+            node_kf_dpc_rmse_delta, node_kf_dpc_ready = node_kf_dpc_convergence.update(
+                node_kf_result["distance_rmse"]
+            )
             consensus_diagnostics["dpc_distance_rmse_delta_m"][sidx] = dpc_rmse_delta
             consensus_diagnostics["dpc_phase_ready"][sidx] = dpc_ready
             consensus_diagnostics["kf_dpc_distance_rmse_delta_m"][sidx] = kf_dpc_rmse_delta
             consensus_diagnostics["kf_dpc_phase_ready"][sidx] = kf_dpc_ready
+            consensus_diagnostics["node_kf_dpc_distance_rmse_delta_m"][sidx] = (
+                node_kf_dpc_rmse_delta
+            )
+            consensus_diagnostics["node_kf_dpc_phase_ready"][sidx] = node_kf_dpc_ready
 
             results = {
                 METHOD_NO_ALG: no_alg_result,
                 METHOD_DFPC: dfpc_result,
+                METHOD_NODE_KF_DPC: node_kf_result,
                 METHOD_KF_DFPC: kf_result,
             }
+            if broadcast_result is not None:
+                results[METHOD_SHORE_BROADCAST] = broadcast_result
             for method, result in results.items():
                 for key, val in result.items():
                     metrics[method][key][sidx] = val
@@ -408,6 +527,23 @@ def run_single_trial(
                     eps=eps,
                     k_const=k_const,
                     metric=dfpc_result,
+                    line_params=line_params_dfpc,
+                )
+                debug.capture(
+                    trial_index=trial_index,
+                    seed=seed,
+                    block=block,
+                    iteration=iteration,
+                    method=METHOD_NODE_KF_DPC,
+                    p_u_true=p_u_true,
+                    p_u_est=uav_est_dfpc,
+                    node_true_xyz=buoy_true_short,
+                    node_est_xyz=node_est_kf,
+                    phi_true=phi_true,
+                    amp=amp,
+                    eps=eps,
+                    k_const=k_const,
+                    metric=node_kf_result,
                     line_params=line_params_dfpc,
                 )
                 debug.capture(
@@ -441,7 +577,7 @@ def run_single_trial(
         "uav_kf_window_updates": uav_kf_trajectory_initializations,
         "uav_kf_trajectory_initializations": uav_kf_trajectory_initializations,
         "uav_kf_position_updates": uav_kf_position_updates,
-        "uav_kf_initialization_step": 0,
+        "uav_kf_initialization_step": -int(cfg.warmup_steps),
         "uav_kf_window_size": 1,
         "consensus_diagnostics": consensus_diagnostics,
         "graph_diagnostics": graph_diagnostics,
@@ -455,14 +591,13 @@ def run_experiment(cfg: ExperimentConfig) -> dict[str, Any]:
     device = backend.resolve_device(cfg)
     print(f"Global consensus device: {device}", flush=True)
     debug = DebugRecorder.from_config(cfg)
-    methods = METHODS
-
     trials = []
     for trial in range(mc_trials):
         seed = int(cfg.seed) + trial * int(cfg.mc_seed_stride)
         print(f"MC trial {trial + 1}/{mc_trials} seed={seed}", flush=True)
         trials.append(run_single_trial(cfg, seed, trial, debug))
 
+    methods = trials[0]["methods"]
     total_steps = trials[0]["total_steps"]
     metrics = {
         method: {key: np.zeros(total_steps, dtype=np.float64) for key in METRIC_KEYS}

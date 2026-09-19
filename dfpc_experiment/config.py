@@ -29,6 +29,8 @@ class ExperimentConfig:
     fc_mhz: float = 20.0
     T_long: int = 20
     K: int = 30
+    # Number of shared, unrecorded observations immediately before formal k=0.
+    warmup_steps: int = 0
     area_radius: float = 500.0
     uav_height: float = 120.0
     uav_start_x: float | None = None
@@ -59,6 +61,12 @@ class ExperimentConfig:
     buoy_center_obs_noise: float = 1.0
     system_phase_std_deg: float = 3.0
 
+    # Optional shore-station broadcast.  One common UAV fix and one fix per
+    # buoy are delivered instantaneously to every transmitter at each step.
+    shore_broadcast_enabled: bool = False
+    shore_broadcast_uav_noise: float = 0.0
+    shore_broadcast_node_noise: float = 0.0
+
     # -------------------------
     # 三维恒速 Kalman 滤波参数
     # -------------------------
@@ -70,10 +78,10 @@ class ExperimentConfig:
     # Mean current velocity is fixed; stochastic center accumulation is wired
     # separately as position diffusion when the buoy KF is constructed.
     buoy_kf_accel_std: float = 0.0
-    # The current speed/direction are fixed and used as the initial velocity
-    # mean.  Keep only a small mismatch allowance; a broad prior lets noisy
-    # position fixes create a spurious early velocity transient.
-    buoy_kf_initial_velocity_std: float = 0.01
+    # The simulated current speed/direction are fixed and known exactly.  Keep
+    # their velocity covariance effectively fixed so noisy position fixes do
+    # not create a spurious velocity bias that accumulates into late-time drift.
+    buoy_kf_initial_velocity_std: float = 0.0
 
     # 位移中心按固定洋流速度和方向确定性移动。
     buoy_wave_speed: float = 0.3
@@ -130,6 +138,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fc_mhz", type=float, default=ExperimentConfig.fc_mhz)
     parser.add_argument("--T_long", type=int, default=ExperimentConfig.T_long)
     parser.add_argument("--K", type=int, default=ExperimentConfig.K)
+    parser.add_argument("--warmup_steps", type=int, default=ExperimentConfig.warmup_steps)
     parser.add_argument("--area_radius", type=float, default=ExperimentConfig.area_radius)
     parser.add_argument("--uav_height", type=float, default=ExperimentConfig.uav_height)
     parser.add_argument("--uav_start_x", type=float, default=None)
@@ -162,6 +171,9 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--buoy_center_obs_noise", type=float, default=ExperimentConfig.buoy_center_obs_noise)
     parser.add_argument("--system_phase_std_deg", type=float, default=ExperimentConfig.system_phase_std_deg)
+    parser.add_argument("--shore_broadcast_enabled", action="store_true")
+    parser.add_argument("--shore_broadcast_uav_noise", type=float, default=ExperimentConfig.shore_broadcast_uav_noise)
+    parser.add_argument("--shore_broadcast_node_noise", type=float, default=ExperimentConfig.shore_broadcast_node_noise)
     parser.add_argument("--uav_kf_accel_std", type=float, default=ExperimentConfig.uav_kf_accel_std)
     parser.add_argument("--uav_kf_initial_velocity_std", type=float, default=ExperimentConfig.uav_kf_initial_velocity_std)
     parser.add_argument("--uav_kf_velocity_init_std", type=float, default=ExperimentConfig.uav_kf_velocity_init_std)
@@ -210,6 +222,8 @@ def validate_config(cfg: ExperimentConfig) -> None:
     """在启动重计算前集中检查会破坏物理含义或数组形状的参数。"""
     if cfg.N < 1 or cfg.T_long < 1 or cfg.K < 1:
         raise ValueError("N, T_long and K must be positive")
+    if cfg.warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative")
     if cfg.TL <= 0.0 or cfg.Ts <= 0.0:
         raise ValueError("TL and Ts must both be positive")
     if not 0.0 <= cfg.buoy_center_accumulation_ratio <= 1.0:
@@ -228,6 +242,8 @@ def validate_config(cfg: ExperimentConfig) -> None:
         "uav_kf_initial_velocity_std": cfg.uav_kf_initial_velocity_std,
         "buoy_kf_accel_std": cfg.buoy_kf_accel_std,
         "buoy_kf_initial_velocity_std": cfg.buoy_kf_initial_velocity_std,
+        "shore_broadcast_uav_noise": cfg.shore_broadcast_uav_noise,
+        "shore_broadcast_node_noise": cfg.shore_broadcast_node_noise,
     }
     invalid = [name for name, value in nonnegative.items() if value < 0.0]
     if invalid:

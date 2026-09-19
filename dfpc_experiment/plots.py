@@ -21,7 +21,7 @@ from .io_utils import write_rows
 from .metrics import tail_summary
 
 
-PLOT_SMOOTHING_WINDOW = 11
+PLOT_SMOOTHING_WINDOW = 21
 
 
 def causal_exponential_average(
@@ -232,6 +232,7 @@ This is the modular DPC experiment.
 
 Monte Carlo trials: {res['mc_trials']}. Global consensus device: `{res['compute_device']}`.
 Physical duration: {res['physical_duration_s']:.3f} s; block duration K*Ts={cfg.K * cfg.Ts:g} s; Ts={cfg.Ts:g} s.
+Warm-up: {cfg.warmup_steps} shared observation step(s) before formal k=0; warm-up samples are not plotted or included in reported metrics.
 Buoy centers move at {cfg.buoy_wave_speed:g} m/s in the {cfg.buoy_wave_heading_deg:g} deg direction. At every iteration, separated by Ts={cfg.Ts:g} s, a random displacement with std={cfg.buoy_random_displacement_std:g} m per horizontal axis is sampled; {cfg.buoy_center_accumulation_ratio:g} of it accumulates into the center and the remainder is the instantaneous offset.
 Each buoy independently estimates the UAV trajectory. DPC reaches consensus on
 `[bx,vx,by,vy,bz,vz]` and unit flight direction `[dx,dy,dz]`.

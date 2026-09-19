@@ -7,10 +7,12 @@ sweep 汇总。集中放在这里可以避免不同文件里写出不一致的�
 # 评估基线，不属于保留的算法分支。
 METHOD_NO_ALG = "No Algorithm"
 
-# 保留的两个算法：DPC 使用轨迹状态通信更新；KF-DPC 在通信更新前
-# 先用跨时刻的 UAV/浮标后验预测与当前观测完成 Kalman 更新。
+# DPC 使用轨迹状态通信更新；Node-KF DPC 只滤波浮标位置；KF-DPC
+# 同时使用跨时刻的 UAV/浮标 Kalman 后验。
 METHOD_DPC = "DPC"
+METHOD_NODE_KF_DPC = "Node-KF DPC"
 METHOD_KF_DPC = "KF-DPC"
+METHOD_SHORE_BROADCAST = "Shore Broadcast"
 
 # Backward-compatible Python identifiers for existing experiment scripts.  New
 # reports and tables use DPC because the algorithm has been renamed.
@@ -19,6 +21,7 @@ METHOD_KF_DFPC = METHOD_KF_DPC
 METHODS = [
     METHOD_NO_ALG,
     METHOD_DFPC,
+    METHOD_NODE_KF_DPC,
     METHOD_KF_DFPC,
 ]
 

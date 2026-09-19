@@ -22,6 +22,7 @@ from .config import ExperimentConfig
 from .constants import (
     METHOD_DFPC,
     METHOD_KF_DFPC,
+    METHOD_NODE_KF_DPC,
     METHOD_NO_ALG,
 )
 from .experiment import run_experiment
@@ -30,6 +31,7 @@ from .io_utils import write_rows
 
 PERFORMANCE_METHODS = [
     (METHOD_DFPC, "dfpc"),
+    (METHOD_NODE_KF_DPC, "node_kf_dpc"),
     (METHOD_KF_DFPC, "kf_dfpc"),
 ]
 
@@ -87,6 +89,8 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
     dfpc_tail_power = float(np.mean(metrics[METHOD_DFPC]["power_linear"][tail]))
     kf_tail_gain = float(np.mean(metrics[METHOD_KF_DFPC]["gain_linear"][tail]))
     kf_tail_power = float(np.mean(metrics[METHOD_KF_DFPC]["power_linear"][tail]))
+    node_kf_tail_gain = float(np.mean(metrics[METHOD_NODE_KF_DPC]["gain_linear"][tail]))
+    node_kf_tail_power = float(np.mean(metrics[METHOD_NODE_KF_DPC]["power_linear"][tail]))
     no_alg_tail_power = float(np.mean(metrics[METHOD_NO_ALG]["power_linear"][tail]))
     single_mean_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_mean_power_linear"][tail]))
     single_best_tail_power = float(np.mean(metrics[METHOD_DFPC]["single_node_best_power_linear"][tail]))
@@ -128,6 +132,18 @@ def summarize_result(res: dict[str, Any], factor: str, value: float, label: str)
         "dfpc_final_phase_std_deg": float(metrics[METHOD_DFPC]["phase_std_deg"][-1]),
         "dfpc_final_phase_rmse_deg": float(metrics[METHOD_DFPC]["phase_rmse_deg"][-1]),
         "dfpc_final_distance_rmse_m": float(metrics[METHOD_DFPC]["distance_rmse"][-1]),
+        "node_kf_dpc_tail_power_db": float(10.0 * np.log10(max(node_kf_tail_gain, 1e-30))),
+        "node_kf_improvement_over_dfpc_db": float(10.0 * np.log10(max(node_kf_tail_gain / max(dfpc_tail_gain, 1e-30), 1e-30))),
+        "node_kf_dpc_gain_over_single_mean_db": float(10.0 * np.log10(max(node_kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))),
+        "node_kf_dpc_phase_std_deg": float(np.nanmean(metrics[METHOD_NODE_KF_DPC]["phase_std_deg"][tail])),
+        "node_kf_dpc_phase_rmse_deg": float(np.nanmean(metrics[METHOD_NODE_KF_DPC]["phase_rmse_deg"][tail])),
+        "node_kf_dpc_distance_rmse_m": float(np.nanmean(metrics[METHOD_NODE_KF_DPC]["distance_rmse"][tail])),
+        "node_kf_dpc_node_rmse_m": float(np.nanmean(metrics[METHOD_NODE_KF_DPC]["node_rmse"][tail])),
+        "node_kf_dpc_uav_rmse_m": float(np.nanmean(metrics[METHOD_NODE_KF_DPC]["uav_rmse"][tail])),
+        "node_kf_dpc_final_power_db": float(metrics[METHOD_NODE_KF_DPC]["norm_db"][-1]),
+        "node_kf_dpc_final_phase_std_deg": float(metrics[METHOD_NODE_KF_DPC]["phase_std_deg"][-1]),
+        "node_kf_dpc_final_phase_rmse_deg": float(metrics[METHOD_NODE_KF_DPC]["phase_rmse_deg"][-1]),
+        "node_kf_dpc_final_distance_rmse_m": float(metrics[METHOD_NODE_KF_DPC]["distance_rmse"][-1]),
         "kf_dfpc_tail_power_db": float(10.0 * np.log10(max(kf_tail_gain, 1e-30))),
         "kf_improvement_over_dfpc_db": float(10.0 * np.log10(max(kf_tail_gain / max(dfpc_tail_gain, 1e-30), 1e-30))),
         "kf_dfpc_gain_over_single_mean_db": float(10.0 * np.log10(max(kf_tail_power / max(single_mean_tail_power, 1e-30), 1e-30))),
@@ -190,11 +206,11 @@ def distance_rmse_convergence_summary(
     method: str,
 ) -> dict[str, float | int]:
     """Return when the configured distance-RMSE convergence rule first holds."""
-    key = (
-        "dpc_phase_ready"
-        if method == METHOD_DFPC
-        else "kf_dpc_phase_ready"
-    )
+    key = {
+        METHOD_DFPC: "dpc_phase_ready",
+        METHOD_NODE_KF_DPC: "node_kf_dpc_phase_ready",
+        METHOD_KF_DFPC: "kf_dpc_phase_ready",
+    }[method]
     ready = np.asarray(res["consensus_diagnostics"][key], dtype=bool)
     indices = np.flatnonzero(ready)
     step = int(indices[0]) if indices.size else int(ready.size)
@@ -377,6 +393,7 @@ def detect_frequency_rebounds(
     group = sorted(rows, key=lambda row: float(row["factor_value"]))
     method_specs = [
         (METHOD_DFPC, "dfpc"),
+        (METHOD_NODE_KF_DPC, "node_kf_dpc"),
         (METHOD_KF_DFPC, "kf_dfpc"),
     ]
     events: list[dict[str, Any]] = []
@@ -393,12 +410,12 @@ def detect_frequency_rebounds(
                 f"{prefix}_tail_power_db",
                 (
                     f"{prefix}_phase_std_deg"
-                    if prefix == "kf_dfpc"
+                    if prefix != "dfpc"
                     else f"{prefix}_tail_phase_std_deg"
                 ),
                 (
                     f"{prefix}_distance_rmse_m"
-                    if prefix == "kf_dfpc"
+                    if prefix != "dfpc"
                     else f"{prefix}_tail_distance_rmse_m"
                 ),
             ),
@@ -514,6 +531,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         ("dfpc_tail_uav_rmse_m", "UAV RMSE (m)", f"{file_prefix}_DPC-UAV位置RMSE.png"),
         ("dfpc_tail_uav_velocity_rmse_mps", "UAV velocity RMSE (m/s)", f"{file_prefix}_DPC-UAV速度RMSE.png"),
         ("kf_dfpc_tail_power_db", "UAV+Node-KF DPC normalized power (dB)", f"{file_prefix}_KF-DPC尾段归一化功率.png"),
+        ("node_kf_dpc_tail_power_db", "Node-KF DPC normalized power (dB)", f"{file_prefix}_仅节点KF-DPC尾段归一化功率.png"),
         ("kf_improvement_over_dfpc_db", "KF improvement over DPC (dB)", f"{file_prefix}_KF-DPC相对DPC提升.png"),
         ("kf_dfpc_distance_rmse_m", "UAV+Node-KF distance RMSE (m)", f"{file_prefix}_KF-DPC距离RMSE.png"),
     ]
@@ -535,6 +553,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_power_db",
+                "node_kf_dpc_tail_power_db",
                 "kf_dfpc_tail_power_db",
             ],
             "Tail normalized power (dB)",
@@ -543,6 +562,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_phase_std_deg",
+                "node_kf_dpc_phase_std_deg",
                 "kf_dfpc_phase_std_deg",
             ],
             "Tail residual phase std (deg)",
@@ -551,6 +571,7 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
         (
             [
                 "dfpc_tail_node_rmse_m",
+                "node_kf_dpc_node_rmse_m",
                 "kf_dfpc_node_rmse_m",
             ],
             "Tail node RMSE (m)",
@@ -577,24 +598,21 @@ def plot_factor(rows: list[dict[str, Any]], factor: str, out_dir: Path) -> None:
     if factor == "frequency":
         comparison_specs = [
             (
-                "dfpc_tail_power_db",
-                "kf_dfpc_tail_power_db",
+                ["dfpc_tail_power_db", "node_kf_dpc_tail_power_db", "kf_dfpc_tail_power_db"],
                 "Tail normalized power (dB)",
                 "载波频率扫描_DPC与KF-DPC尾段功率对比.png",
             ),
             (
-                "dfpc_final_power_db",
-                "kf_dfpc_final_power_db",
+                ["dfpc_final_power_db", "node_kf_dpc_final_power_db", "kf_dfpc_final_power_db"],
                 "Final normalized power (dB)",
                 "载波频率扫描_DPC与KF-DPC最终功率对比.png",
             ),
         ]
-        for dfpc_key, kf_key, ylabel, filename in comparison_specs:
-            dfpc_values = np.array([float(row[dfpc_key]) for row in group], dtype=np.float64)
-            kf_values = np.array([float(row[kf_key]) for row in group], dtype=np.float64)
+        for keys, ylabel, filename in comparison_specs:
             plt.figure(figsize=(10.2, 5.8))
-            plt.plot(xs, dfpc_values, marker="o", linewidth=2.0, label="DPC")
-            plt.plot(xs, kf_values, marker="o", linewidth=2.0, label="UAV+Node-KF DPC")
+            for key, label in zip(keys, [method for method, _ in PERFORMANCE_METHODS]):
+                values = np.array([float(row[key]) for row in group], dtype=np.float64)
+                plt.plot(xs, values, marker="o", linewidth=2.0, label=label)
             plt.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
             plt.xlabel("carrier frequency (MHz)")
             plt.ylabel(ylabel)
